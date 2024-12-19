@@ -22,13 +22,13 @@
 ;
 ;Error codes:
 ;
-BADOP	EQU	1		;Bad operation code
-DIVBY0	EQU	18		;Division by zero
-TOOBIG	EQU	20		;Too big
-NGROOT	EQU	21		;Negative root
-LOGRNG	EQU	22		;Log range
-ACLOST	EQU	23		;Accuracy lost
-EXPRNG	EQU	24		;Exp range
+DEFC BADOP	 = 	1		;Bad operation code
+DEFC DIVBY0	 = 	18		;Division by zero
+DEFC TOOBIG	 = 	20		;Too big
+DEFC NGROOT	 = 	21		;Negative root
+DEFC LOGRNG	 = 	22		;Log range
+DEFC ACLOST	 = 	23		;Accuracy lost
+DEFC EXPRNG	 = 	24		;Exp range
 ;
 	PUBLIC	FPP
 ;
@@ -131,7 +131,7 @@ RTABLE:	DEFW	FAND		;AND (FLOATING-POINT)
 	DEFW	FEOR		;EOR
 	DEFW	FMOD		;MOD
 	DEFW	FOR		;OR
-	DEFW	FLE		;<= 
+	DEFW	FLE		;<=
 	DEFW	FNE		;<>
 	DEFW	FGE		;>=
 	DEFW	FLT		;<

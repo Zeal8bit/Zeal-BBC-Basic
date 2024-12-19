@@ -1,13 +1,13 @@
 ; Copyright (c) 2020 J.B. Langston
-; 
+;
 ; This software is provided 'as-is', without any express or implied
 ; warranty. In no event will the authors be held liable for any damages
 ; arising from the use of this software.
-; 
+;
 ; Permission is granted to anyone to use this software for any purpose,
 ; including commercial applications, and to alter it and redistribute it
 ; freely, subject to the following restrictions:
-; 
+;
 ; 1. The origin of this software must not be misrepresented; you must not
 ;    claim that you wrote the original software. If you use this software
 ;    in a product, an acknowledgment in the product documentation would be
@@ -45,7 +45,7 @@
 	EXTERN	COMMA
 	EXTERN	XEQ
 
-ESC	EQU	27
+DEFC ESC	 = 	27
 
 ;CLRSCN	- Clear screen.
 ;	  (Alter characters to suit your VDU)
@@ -201,7 +201,7 @@ PUTIMS:
 	CALL	EXTERR
 	DEFM	"Not implemented"
 	DEFB	0
-	
+
 ; VDP state
 VDPADR:	DEFB	0BEH		; VDP base port
 VDPINT:	DEFB	0		; 0 = NMI, 1 = INT
@@ -214,11 +214,11 @@ TEXTX:	DEFW	0		; Current text X coordinate
 TEXTY:	DEFW	0		; Current text Y coordinate
 
 ; VDP table addresses
-NAMTAB	EQU	3800H		; name table
-COLTAB	EQU	2000H		; color table
-PATTAB	EQU	0H		; pattern table
-SPATAB	EQU	3BC0H		; sprite attribute table
-SPPTAB	EQU	1800H		; sprite pattern table
+DEFC NAMTAB	 = 	3800H		; name table
+DEFC COLTAB	 = 	2000H		; color table
+DEFC PATTAB	 = 	0H		; pattern table
+DEFC SPATAB	 = 	3BC0H		; sprite attribute table
+DEFC SPPTAB	 = 	1800H		; sprite pattern table
 
 ; default register values
 DEFREG:	DEFB	0, 80H		; blank, 16KB enabled
@@ -233,7 +233,7 @@ MODREG:	DEFB	0, 0D0H		; MODE 0: text
 	DEFB	0, 0C0H		; MODE 1: tile graphics
 	DEFB	2, 0C0H		; MODE 2: bitmap graphics
 	DEFB	0, 0C8H		; MODE 3: multicolor graphics
-	
+
 ; initialize vdp registers to default values
 ;	A = mode to set
 VDPINI:	AND	3		; limit to modes 0-3
@@ -335,7 +335,7 @@ SETREG:	LD	A,(CMODE)
 	INC	B
 	OUT	(C),A
 	OUT	(C),B
-	RET	
+	RET
 
 ; Bit mask values for X coordinates 0 through 7
 MASK:	DEFB 80H, 40H, 20H, 10H, 8H, 4H, 2H, 1H
