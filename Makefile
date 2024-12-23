@@ -1,12 +1,14 @@
-SRCS = src/main.asm src/exec.asm src/eval.asm src/fpp.asm src/hardware.asm src/zeal-os.asm src/ram.asm
+BIN=bbcbasic.bin
+SRCS = src/main.asm src/exec.asm src/eval.asm src/fpp.asm src/hardware.asm src/zos.asm src/ram.asm
+BUILDDIR=build
 
-all: build bbc.bin
+all: build ${BIN}
 
 build:
-	mkdir build/
+	mkdir ${BUILDDIR}
 
-bbc.bin:
-	z88dk-z80asm -I$(ZOS_PATH)/kernel_headers/z88dk-z80asm/ -O=build -o=bbc.bin -b -d -l -m $(SRCS)
+${BIN}:
+	z88dk-z80asm -I$(ZOS_PATH)/kernel_headers/z88dk-z80asm/ -O=${BUILDDIR} -o=${BIN} -b -d -l -m $(SRCS)
 
 clean:
-	rm -fr build/*
+	rm -fr ${BUILDDIR}/*

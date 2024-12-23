@@ -1,11 +1,26 @@
 {
-  "z80-macroasm.format.enabled": true,
+  "z80-macroasm.format.enabled": false,
   "z80-macroasm.format.baseIndent": 1,
   "z80-macroasm.format.whitespaceAfterInstruction": "single-space",
-  "z80-macroasm.format.spaceAfterArgument":true,
-  "z80-macroasm.format.spacesAroundOperators":true,
-  "z80-macroasm.format.uppercaseKeywords":false,
-  "z80-macroasm.format.bracketType":"round",
-  "z80-macroasm.format.colonAfterLabels":true,
-  "z80-macroasm.format.hexaNumberStyle":"c-style"
+  "z80-macroasm.format.spaceAfterArgument": true,
+  "z80-macroasm.format.spacesAroundOperators": true,
+  "z80-macroasm.format.uppercaseKeywords": false,
+  "z80-macroasm.format.bracketType": "round",
+  "z80-macroasm.format.colonAfterLabels": "no-change",
+  "z80-macroasm.format.hexaNumberStyle": "c-style",
+  "z80-macroasm.format.controlIndent": 1,
+  "z80-macroasm.format.hexaNumberCase": true,
+  "z80-macroasm.files.include": "**/*.{asm}",
+  "[z80-macroasm]": {
+    "editor.tabSize": 8,
+    "editor.insertSpaces": true,
+    "editor.rulers": [120],
+    "files.eol": "\n",
+    "editor.colorDecorators": false,
+    "editor.formatOnType": true,
+    "editor.detectIndentation": false
+  },
+  "files.associations": {
+    "*.{asm,inc}": "z80-macroasm"
+  }
 }
