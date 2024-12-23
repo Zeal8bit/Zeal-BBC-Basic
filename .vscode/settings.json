@@ -1,0 +1,11 @@
+{
+  "z80-macroasm.format.enabled": true,
+  "z80-macroasm.format.baseIndent": 1,
+  "z80-macroasm.format.whitespaceAfterInstruction": "single-space",
+  "z80-macroasm.format.spaceAfterArgument":true,
+  "z80-macroasm.format.spacesAroundOperators":true,
+  "z80-macroasm.format.uppercaseKeywords":false,
+  "z80-macroasm.format.bracketType":"round",
+  "z80-macroasm.format.colonAfterLabels":true,
+  "z80-macroasm.format.hexaNumberStyle":"c-style"
+}

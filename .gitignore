@@ -1,3 +1,5 @@
+build/*
+tmp/*
 *.o
 *.err
 *.lis
