@@ -1015,7 +1015,7 @@ CLOOP0:	JP	CLOOP
 ;LOAD filename
 ;
 LOAD:	CALL	EXPRS		;GET FILENAME
-    XOR A   ; NULL-terminated string
+        XOR A   ; NULL-terminated string
         LD	(DE),A
         CALL	LOAD0
         CALL	CLEAR

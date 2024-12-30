@@ -44,9 +44,19 @@
 ;  Destroys: A,B,C,D,E,H,L,F
 ;
 OSINIT:
-    ld de, 0xC000
-    ld hl, USER
-    ret
+        ld a, b
+        or c
+        jr z, SKIPLOAD
+        ; load file
+
+        ld hl, de
+        ld de, 0x8000 ; start of user memory
+        ld bc, 0xF800 - 0x8000
+        call OSLOAD
+SKIPLOAD:
+        ld de, 0xF800
+        ld hl, 0x8000 ; ld hl, USER ; start of user memory
+        ret
 
 ;PTEXT - Print text
 ;   Inputs: HL = address of text
@@ -54,16 +64,16 @@ OSINIT:
 ; Destroys: A,B,H,L,F
 ;
 CPTEXT:
-    push de
-    push bc
-    ; Put buffer in DE
-    ex de, hl
-    ld c, b
-    ld b, 0
-    S_WRITE1(DEV_STDOUT)
-    pop bc
-    pop de
-    ret
+        push de
+        push bc
+        ; Put buffer in DE
+        ex de, hl
+        ld c, b
+        ld b, 0
+        S_WRITE1(DEV_STDOUT)
+        pop bc
+        pop de
+        ret
 
 
 ;OSRDCH - Read from the current input stream (keyboard).
@@ -71,31 +81,31 @@ CPTEXT:
 ; Destroys: A,F
 ;
 OSRDCH:
-    push bc
-    push de
-    push hl
-    S_READ3(DEV_STDIN, BUFFER, 1)
-    pop hl
-    pop de
-    pop bc
-    ret
+        push bc
+        push de
+        push hl
+        S_READ3(DEV_STDIN, BUFFER, 1)
+        pop hl
+        pop de
+        pop bc
+        ret
 
 ;OSWRCH - Write a character to console output.
 ;   Inputs: A = character.
 ; Destroys: Nothing
 ;
 OSWRCH:
-    ld (BUFFER), a
-    push af
-    push bc
-    push de
-    push hl
-    S_WRITE3(DEV_STDOUT, BUFFER, 1)
-    pop hl
-    pop de
-    pop bc
-    pop af
-    ret
+        ld (BUFFER), a
+        push af
+        push bc
+        push de
+        push hl
+        S_WRITE3(DEV_STDOUT, BUFFER, 1)
+        pop hl
+        pop de
+        pop bc
+        pop af
+        ret
 
 ;OSLINE - Read/edit a complete line, terminated by CR.
 ;   Inputs: HL addresses destination buffer.
@@ -105,11 +115,11 @@ OSWRCH:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSLINE:
-    ex de, hl
-    ld bc, 254
-    S_READ1(DEV_STDIN)
-    xor a
-    ret
+        ex de, hl
+        ld bc, 254
+        S_READ1(DEV_STDIN)
+        xor a
+        ret
 
 
 ;OSOPEN - Open a file for reading or writing.
@@ -120,21 +130,21 @@ OSLINE:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSOPEN:
-    ; Put the file name in BC
-    ld b, h
-    ld c, l
-    ; Set the flags
-    ld h, O_RDONLY
-    jr c, OSOPEN_READ
-    ld h, O_WRONLY | O_CREAT | O_APPEND
+        ; Put the file name in BC
+        ld b, h
+        ld c, l
+        ; Set the flags
+        ld h, O_RDONLY
+        jr c, OSOPEN_READ
+        ld h, O_WRONLY | O_CREAT | O_APPEND
 OSOPEN_READ:
-    OPEN()
-    ; Check for error, if positif, return
-    or a
-    ret p
+        OPEN()
+        ; Check for error, if positif, return
+        or a
+        ret p
 OSOPEN_ERROR:
-    xor a
-    ret
+        xor a
+        ret
 
 
 ;OSSTAT - Read file status.
@@ -145,7 +155,7 @@ OSOPEN_ERROR:
 ; Destroys: A,D,E,H,L,F
 ;
 OSSTAT:
-    ret
+        ret
 
 
 ;OSBGET - Read a byte from a random disk file.
@@ -155,27 +165,27 @@ OSSTAT:
 ; Destroys: A,B,C,F
 ;
 OSBGET:
-    push de
-    push hl
-    ld h, e
-    ld de, BUFFER
-    ld bc, 1
-    READ()
-    ; If we read 0 byte, it's the end of the file, it's not exactly how it should
-    ; be done but it's the simplest solution for now
-    ld a, b
-    or c
-    jr z, OSBGET_LAST
-    ; No way to return an error, make the assumption it's a success
-    ld a, (de)
-    pop hl
-    pop de
-    ret
+        push de
+        push hl
+        ld h, e
+        ld de, BUFFER
+        ld bc, 1
+        READ()
+        ; If we read 0 byte, it's the end of the file, it's not exactly how it should
+        ; be done but it's the simplest solution for now
+        ld a, b
+        or c
+        jr z, OSBGET_LAST
+        ; No way to return an error, make the assumption it's a success
+        ld a, (de)
+        pop hl
+        pop de
+        ret
 OSBGET_LAST:
-    scf
-    pop hl
-    pop de
-    ret
+        scf
+        pop hl
+        pop de
+        ret
 
 ;OSBPUT - Write a byte to a random disk file.
 ;   Inputs: E = file channel
@@ -183,44 +193,48 @@ OSBGET_LAST:
 ; Destroys: A,B,C,F
 ;
 OSBPUT:
-    push de
-    push hl
-    ld h, e
-    ld de, BUFFER
-    ld bc, 1
-    ; Byte to write in BUFFER
-    ld (de), a
-    WRITE()
-    pop hl
-    pop de
-    ret
+        push de
+        push hl
+        ld h, e
+        ld de, BUFFER
+        ld bc, 1
+        ; Byte to write in BUFFER
+        ld (de), a
+        WRITE()
+        pop hl
+        pop de
+        ret
 
 ;OSLOAD - Load an area of memory from a file.
-;   Inputs: HL addresses filename (term CR)
+;   Inputs: HL addresses filename (NULL-term)
 ;           DE = address at which to load
 ;           BC = maximum allowed size (bytes)
 ;  Outputs: Carry reset indicates no room for file.
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSLOAD:
-    ; Open the file for writing
-    push de
-    push bc
-    ld b, h
-    ld c, l
-    ld h, O_RDONLY
-    OPEN()
-    pop bc
-    pop de
-    ; Check for errors
-    or a
-    jp m, SHOW_ERROR_NEG
-    ; Read the data
-    ld h, a
-    READ()
-    CLOSE()
-    scf   ; For now, always accept the file, do not check the size
-    ret
+        ; Open the file for writing
+        push de
+        push bc
+        ld b, h
+        ld c, l
+        ld h, O_RDONLY
+        OPEN()
+        pop bc
+        pop de
+        ; Check for errors
+        or a
+        jp m, SHOW_ERROR_NEG
+        ; Read the data
+        ld h, a
+        ld bc, 0x2000   ; TODO: load data in chunks up to BC (free memory size)
+        READ()
+        ld (OSLOAD_SIZE), bc
+        CLOSE()
+        scf   ; For now, always accept the file, do not check the size
+        ret
+
+OSLOAD_SIZE: DEFW 0x2000
 
 ;OSSAVE - Save an area of memory to a file.
 ;   Inputs: HL addresses filename (term CR)
@@ -229,27 +243,27 @@ OSLOAD:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSSAVE:
-    ; Open the file for writing
-    push de
-    push bc
-    ld b, h
-    ld c, l
-    ld h, O_WRONLY | O_CREAT | O_TRUNC
-    OPEN()
-    pop bc
-    pop de
-    ; Check for errors
-    or a
-    jp m, SHOW_ERROR_NEG
-    ; Write the data
-    ld h, a
-    WRITE()
-    CLOSE()
-    ret
+        ; Open the file for writing
+        push de
+        push bc
+        ld b, h
+        ld c, l
+        ld h, O_WRONLY | O_CREAT | O_TRUNC
+        OPEN()
+        pop bc
+        pop de
+        ; Check for errors
+        or a
+        jp m, SHOW_ERROR_NEG
+        ; Write the data
+        ld h, a
+        WRITE()
+        CLOSE()
+        ret
 SHOW_ERROR_NEG:
-    neg
+        neg
 SHOW_ERROR:
-    ret
+        ret
 
 
 ;OSSHUT - Close disk file(s).
@@ -258,9 +272,9 @@ SHOW_ERROR:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSSHUT:
-    ld h, e
-    CLOSE()
-    ret
+        ld h, e
+        CLOSE()
+        ret
 
 
 ;
@@ -270,21 +284,21 @@ OSSHUT:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 GETEXT:
-    ld h, e
-    ld de, BUFFER
-    DSTAT()
-    ; Check the error, return 0 in that case
-    or a
-    jr nz, GETEXT_ERROR
-    ; Dereference the size from the structure
-    ld hl, (BUFFER)
-    ld de, (BUFFER + 2)
-    ret
+        ld h, e
+        ld de, BUFFER
+        DSTAT()
+        ; Check the error, return 0 in that case
+        or a
+        jr nz, GETEXT_ERROR
+        ; Dereference the size from the structure
+        ld hl, (BUFFER)
+        ld de, (BUFFER + 2)
+        ret
 GETEXT_ERROR:
-    ld de, 0
-    ld h, d
-    ld l, e
-    ret
+        ld de, 0
+        ld h, d
+        ld l, e
+        ret
 
 ;
 ;GETPTR - Return file pointer.
@@ -293,24 +307,24 @@ GETEXT_ERROR:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 GETPTR:
-    ld h, e
-    ; Use SEEK_CUR with offset 0
-    ld bc, 0
-    ld d, b
-    ld e, c
-    ld a, SEEK_CUR
-    SEEK()
-    jr nz, GETPTR_ERROR
-    ld h, b
-    ld l, c
-    ex de, hl
-    ret
+        ld h, e
+        ; Use SEEK_CUR with offset 0
+        ld bc, 0
+        ld d, b
+        ld e, c
+        ld a, SEEK_CUR
+        SEEK()
+        jr nz, GETPTR_ERROR
+        ld h, b
+        ld l, c
+        ex de, hl
+        ret
 GETPTR_ERROR:
-    ; Return 0 in terms of error
-    ld de, 0
-    ld h, d
-    ld l, e
-    ret
+        ; Return 0 in terms of error
+        ld de, 0
+        ld h, d
+        ld l, e
+        ret
 
 ;
 ;PUTPTR - Update file pointer.
@@ -319,34 +333,34 @@ GETPTR_ERROR:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 PUTPTR:
-    ; Use SEEK_CUR with offset 0
-    ex de, hl
-    ld b, h
-    ld c, l
-    ; Set the opened dev
-    ld h, a
-    ld a, SEEK_SET
-    SEEK()
-    ret
+        ; Use SEEK_CUR with offset 0
+        ex de, hl
+        ld b, h
+        ld c, l
+        ; Set the opened dev
+        ld h, a
+        ld a, SEEK_SET
+        SEEK()
+        ret
 
 
 PROMPT:
-    ld a, '>'
-    call OSWRCH
-    ld a, ' '
-    jp OSWRCH
+        ld a, '>'
+        call OSWRCH
+        ld a, ' '
+        jp OSWRCH
 
 ;
 ;BYE - Stop interrupts and return to CP/M.
 ;
 BYE:
-    ld h, 0 ; Return value
-    EXIT()
+        ld h, 0 ; Return value
+        EXIT()
 
 RESET:
-    xor a
-    ld (OPTVAL), a
-    ret
+        xor a
+        ld (OPTVAL), a
+        ret
 
 OPTVAL: DEFS 1
 
@@ -354,22 +368,22 @@ OPTVAL: DEFS 1
 ; Destroys: A,F
 ;
 LTRAP:
-    xor a
-    ret
+        xor a
+        ret
 
 ;TRAP - Test ESCAPE flag and abort if set;
 ;       every 20th call, test for keypress.
 ; Destroys: A,H,L,F
 ;
 TRAP:
-    ret
+        ret
 
 ;
 ;OSCLI - Process an "operating system" command
 ;
 OSCLI:
-    jr BYE
-    ret
+        jr BYE
+        ret
 
 ;
 ;OSKEY - Read key with time-limit, test for ESCape.
@@ -380,11 +394,11 @@ OSCLI:
 ; Destroys: A,H,L,F
 ;
 OSKEY:
-    xor a
-    ret
+        xor a
+        ret
 
 OSCALL:
-    ret
+        ret
 
     ; Make sure it's big enough for storing the stat
 BUFFER: DEFS ZOS_STAT_SIZE

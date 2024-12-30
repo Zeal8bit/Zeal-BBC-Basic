@@ -1,4 +1,4 @@
-BIN=bbcbasic.bin
+BIN=../bbcbasic.bin
 SRCS = src/main.asm src/exec.asm src/eval.asm src/fpp.asm src/hardware.asm src/zos.asm src/ram.asm
 BUILDDIR=build
 
