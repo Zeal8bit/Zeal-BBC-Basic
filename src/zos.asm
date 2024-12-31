@@ -92,32 +92,33 @@ OSRDCH:
         ; raw mode
         ld h, DEV_STDIN
         ld c, KB_CMD_SET_MODE
-        ld de, (KB_READ_NON_BLOCK | KB_MODE_RAW)
+        ld de, KB_READ_NON_BLOCK | KB_MODE_RAW
         IOCTL()
 
         ei
         ; loop until a key is pressed
 WAITFORKEY:
-        S_READ3(DEV_STDIN, BUFFER, 1)
-        jp nz, KEYERROR
-        ld a, c ; how many bytes read?
+        S_READ3(DEV_STDIN, BUFFER, 3)
         or a
-        jp z, WAITFORKEY ; if no key
-        ld a, (BUFFER) ; get the code from BUFFER[0]
-        cp a, KB_RELEASED ;
-        jp z, WAITFORKEY
+        jr nz, KEYERROR
+        ; A is zero for sure, OR it with C to check if C is 0
+        or c
+        jr z, WAITFORKEY ; if no key
+        ld a, (de) ; get the code from BUFFER[0]
+        cp KB_RELEASED
+        jr z, WAITFORKEY
         jp KEYREAD
 KEYERROR:
         ; an error has occurred, handle it
-        neg
-        ld (BUFFER), a
+        ; DE still contains the buffer address
+        ld (de), a
 KEYREAD:
         di
 
         ; go back to cooked mode
         ld h, DEV_STDIN
         ld c, KB_CMD_SET_MODE
-        ld de, (KB_READ_BLOCK | KB_MODE_COOKED)
+        ld de, KB_READ_BLOCK | KB_MODE_COOKED
         IOCTL()
 
         pop hl
