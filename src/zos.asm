@@ -49,13 +49,14 @@ OSINIT:
         jr z, SKIPLOAD
         ; load file
 
-        ld hl, de
-        ld de, 0x8000 ; start of user memory
-        ld bc, 0xF800 - 0x8000
-        call OSLOAD
+        ld hl, ACCS ; copy filename to string buffer
+        ex de, hl
+        ldir
+        ; Reset Z flag
+        or 1
 SKIPLOAD:
         ld de, 0xF800
-        ld hl, 0x8000 ; ld hl, USER ; start of user memory
+        ld hl, USER ; start of user memory
         ret
 
 ;PTEXT - Print text
@@ -272,9 +273,12 @@ SHOW_ERROR:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSSHUT:
-        ld h, e
-        CLOSE()
-        ret
+    ld a, e
+    or a
+    ret z
+    ld h, a
+    CLOSE()
+    ret
 
 
 ;
