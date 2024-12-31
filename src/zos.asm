@@ -1,4 +1,5 @@
     INCLUDE "zos_sys.asm"
+    INCLUDE "zos_keyboard.asm"
 
         PUBLIC	OSINIT
         PUBLIC	OSRDCH
@@ -44,6 +45,7 @@
 ;  Destroys: A,B,C,D,E,H,L,F
 ;
 OSINIT:
+        di       ; disable interrupts
         ld a, b
         or c
         jr z, SKIPLOAD
@@ -81,14 +83,48 @@ CPTEXT:
 ;  Outputs: A = character
 ; Destroys: A,F
 ;
+KEYGET:
 OSRDCH:
         push bc
         push de
         push hl
+
+        ; raw mode
+        ld h, DEV_STDIN
+        ld c, KB_CMD_SET_MODE
+        ld de, (KB_READ_NON_BLOCK | KB_MODE_RAW)
+        IOCTL()
+
+        ei
+        ; loop until a key is pressed
+WAITFORKEY:
         S_READ3(DEV_STDIN, BUFFER, 1)
+        jp nz, KEYERROR
+        ld a, c ; how many bytes read?
+        or a
+        jp z, WAITFORKEY ; if no key
+        ld a, (BUFFER) ; get the code from BUFFER[0]
+        cp a, KB_RELEASED ;
+        jp z, WAITFORKEY
+        jp KEYREAD
+KEYERROR:
+        ; an error has occurred, handle it
+        neg
+        ld (BUFFER), a
+KEYREAD:
+        di
+
+        ; go back to cooked mode
+        ld h, DEV_STDIN
+        ld c, KB_CMD_SET_MODE
+        ld de, (KB_READ_BLOCK | KB_MODE_COOKED)
+        IOCTL()
+
         pop hl
         pop de
         pop bc
+
+        ld a, (BUFFER) ; get the code from BUFFER[0]
         ret
 
 ;OSWRCH - Write a character to console output.
@@ -118,7 +154,9 @@ OSWRCH:
 OSLINE:
         ex de, hl
         ld bc, 254
+        ei
         S_READ1(DEV_STDIN)
+        di
         xor a
         ret
 
@@ -140,7 +178,7 @@ OSOPEN:
         ld h, O_WRONLY | O_CREAT | O_APPEND
 OSOPEN_READ:
         OPEN()
-        ; Check for error, if positif, return
+        ; Check for error, if positive, return
         or a
         ret p
 OSOPEN_ERROR:
@@ -359,6 +397,7 @@ PROMPT:
 ;
 BYE:
         ld h, 0 ; Return value
+        ei
         EXIT()
 
 RESET:
