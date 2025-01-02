@@ -64,8 +64,8 @@ CLRSCN:
 ;		  HL = vertical position (TOP=0)
 ; 	  Destroys: A,D,E,H,L,F
 PUTCSR:
-        LD (TEXTX),DE		;SAVE X & Y FOR LATER
-        LD (TEXTY),HL
+        ld (TEXTX), de		;SAVE X & Y FOR LATER
+        ld (TEXTY), hl
         ld h, DEV_STDOUT
         ld c, CMD_SET_CURSOR_XY
         ld a, (TEXTX)
@@ -79,9 +79,22 @@ PUTCSR:
 ;	  Outputs:  DE = X coordinate (POS)
 ;		    HL = Y coordinate (VPOS)
 ;  	  Destroys: A,D,E,H,L,F
+CURSOR_POS: DEFW 0x00
 GETCSR:
-        LD	DE,(TEXTX)
-        LD	HL,(TEXTY)
+        ld h, DEV_STDOUT
+        ld c, CMD_GET_CURSOR_XY
+        ld de, CURSOR_POS
+        IOCTL()
+
+        ld de, (CURSOR_POS)
+
+        ld a, e
+        ld (TEXTX), a
+        ld a, d
+        ld (TEXTY), a
+
+        ld de, (TEXTX)
+        ld hl, (TEXTY)
         RET
 
 ;GETIME	- Read elapsed-time clock.
