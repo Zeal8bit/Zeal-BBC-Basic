@@ -97,44 +97,26 @@ GETIME:	LD	DE,0
 PUTIME:	RET
 ;
 ;COLOUR	- Set text color
+COLOR_FG: DEFB 0x0F
+COLOR_BG: DEFB 0x00
+
 COLOUR:
-        di                      ; EXPRI uses alternate registers
+        call EXPRI
         exx
-        push bc
-        push de
-        push hl
-        push af
 
-        CALL	EXPRI
-        EXX
-
-        pop af
-        pop hl
-        pop de
-        pop bc
-        ei                    ; re-enable interrupts
-
-        LD	A,L
-        AND	7
-        BIT	7,L
-        JP	Z,FGCLR
-        ADD	10
-FGCLR:  ADD	30
-        BIT	3,L
-        JP	Z,OUTCLR
-        ADD	60
-OUTCLR:	LD	L,A
-        ; LD	A,ESC
-        ; CALL	OUTCHR
-        ; LD	A,'['
-        ; CALL	OUTCHR
-        ; CALL	PBCDL
-        ; LD	A,'m'
-        ; CALL	OUTCHR
+        ld a, l
+        ld hl, COLOR_FG ; prepare for faster write
+        cp 128
+        jr c, LOADCLR
+BGCLR:
+        and 0x7f        ; remove MSB
+        inc hl          ; point to bg color
+LOADCLR:
+        ld (hl), a      ; load color
+OUTCLR:
         ld h, DEV_STDOUT
         ld c, CMD_SET_COLORS
-        ld d, 0
-        ld e, a
+        ld de, (COLOR_FG)
         IOCTL()
         JP	XEQ
 
