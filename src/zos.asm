@@ -54,7 +54,9 @@
 ;  Destroys: A,B,C,D,E,H,L,F
 ;
 OSINIT:
-        di       ; disable interrupts
+        ; Switch to slow interrupt handler
+        ld a, 4
+        out (0xd3), a
         KB_MODE(KB_READ_NON_BLOCK | KB_MODE_RAW)        ; default to raw keyboard for INKEYs
 
         ld a, b
@@ -96,6 +98,7 @@ CPTEXT:
 ; Destroys: A,F
 ;
 OSRDCH:
+        ld hl, 0        ; 0 centiseconds
         call OSKEY      ; check for a key
         ret c           ; return if carry set
         jr OSRDCH       ; loop until key is press
@@ -133,9 +136,7 @@ OSLINE:
 
         ex de, hl
         ld bc, 254
-        ei
         S_READ1(DEV_STDIN)
-        di
         xor a
 
         push af ; save S_READ1 error
@@ -393,8 +394,11 @@ PROMPT:
 ;BYE - Stop interrupts and return to Shell.
 ;
 BYE:
+        ; switch back to fast interrupt handler
+        ld a, 2
+        out (0xd3), a
+
         ld h, 0 ; Return value
-        ei
         EXIT()
 
 RESET:
@@ -438,11 +442,10 @@ OSCLI:
 ; Destroys: A,H,L,F
 ;
 OSKEY:
-        push bc
+        push bc ; save registers
         push de
-        push hl
+        push hl ; save time-out
 
-        ei
 @getkey:
         S_READ3(DEV_STDIN, BUFFER, 3)
         or a    ; did an error occur?
@@ -460,10 +463,8 @@ OSKEY:
         ; an error has occurred, handle it
         xor a   ; clear carry flag
 @read:
-        di
-
         pop hl
-        pop de
+        pop de  ; restore registers
         pop bc
 
         ld a, (BUFFER) ; get the code from BUFFER[0]
