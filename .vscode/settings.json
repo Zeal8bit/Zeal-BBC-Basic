@@ -1,5 +1,9 @@
 {
   "editor.rulers": [80],
+  "workbench.editorAssociations": {
+    "*.bbc": "hexEditor.hexedit",
+    "*.bin": "hexEditor.hexedit"
+  },
   "z80-macroasm.format.enabled": false,
   "z80-macroasm.format.baseIndent": 1,
   "z80-macroasm.format.whitespaceAfterInstruction": "single-space",

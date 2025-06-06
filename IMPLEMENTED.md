@@ -1,0 +1,136 @@
+# BBC Basic Implementation
+
+The following words are supported
+
+  [x] ?   (indirection | peek/poke)
+  [x] !   (indirection | peek/poke)
+  [x] $   (indirection | peek/poke)
+  [x] [   (assembler)
+  [x] ]   (assembler)
+  [?] *   (OS Call)
+  [?] **  (OS Call)
+  [?] @%  (print format control)
+  [x] AND
+  [x] ABS
+  [x] ACS
+  [ ] ADVAL
+  [x] ASC
+  [x] ASN
+  [x] ATN
+  [?] AUTO
+  [x] BGET
+  [x] BPUT
+  [x] COLOUR
+  [x] COLOR
+  [?] CALL
+  [?] CHAIN
+  [x] CHR$
+  [x] CLEAR
+  [x] CLOSE
+  [ ] CLG
+  [x] CLS
+  [x] COS
+  [x] COUNT
+  [x] DATA
+  [x] DEG
+  [x] DEF
+  [x] DELETE
+  [x] DIV
+  [x] DIM
+  [ ] DRAW
+  [x] ENDPROC
+  [x] END
+  [ ] ENVELOPE
+  [x] ELSE
+  [x] EVAL
+  [x] ERL
+  [x] ERROR
+  [x] EOF
+  [x] EOR
+  [x] ERR
+  [x] EXP
+  [ ] EXT
+  [x] FOR
+  [x] FALSE
+  [x] FN
+  [x] GOTO
+  [x] GET$
+  [x] GET
+  [x] GOSUB
+  [ ] GCOL
+  [x] HIMEM
+  [x] INPUT
+  [x] IF
+  [?] INKEY$
+  [?] INKEY
+  [x] INT
+  [x] INSTR()
+  [x] LIST
+  [ ] LINE
+  [x] LOAD
+  [x] LOMEM
+  [?] LOCAL
+  [x] LEFT$()
+  [x] LEN
+  [x] LET
+  [x] LOG
+  [x] LN
+  [x] MID$()
+  [ ] MODE
+  [x] MOD
+  [ ] MOVE
+  [x] NEXT
+  [x] NEW
+  [x] NOT
+  [ ] OLD
+  [x] ON
+  [x] OFF
+  [x] OR
+  [x] OPENIN
+  [x] OPENOUT
+  [x] OPENUP
+  [?] OSCLI
+  [x] PRINT
+  [x] PAGE
+  [x] PTR
+  [x] PI
+  [ ] PLOT
+  [ ] POINT(
+  [x] PROC
+  [x] POS
+  [ ] PUT
+  [x] RETURN
+  [x] REPEAT
+  [x] REPORT
+  [x] READ
+  [x] REM
+  [x] RUN
+  [x] RAD
+  [x] RESTORE
+  [x] RIGHT$()
+  [x] RND
+  [x] RENUMBER
+  [x] STEP
+  [x] SAVE
+  [x] SGN
+  [x] SIN
+  [x] SQR
+  [x] SPC
+  [x] STR$
+  [x] STRING$()
+  [ ] SOUND
+  [x] STOP
+  [x] TAN
+  [x] THEN
+  [x] TO
+  [x] TAB(
+  [x] TRACE
+  [ ] TIME
+  [x] TRUE
+  [x] UNTIL
+  [?] USR
+  [ ] VDU
+  [x] VAL
+  [x] VPOS
+  [x] WIDTH
+  [x] HIMEM

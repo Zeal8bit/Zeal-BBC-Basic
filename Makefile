@@ -1,4 +1,4 @@
-BIN=../bbcbasic.bin
+BIN=bbcbasic.bin
 SRCS = src/main.asm src/exec.asm src/eval.asm src/fpp.asm src/hardware.asm src/zos.asm src/ram.asm
 BUILDDIR=build
 
@@ -8,7 +8,12 @@ build:
 	mkdir ${BUILDDIR}
 
 ${BIN}:
-	z88dk-z80asm -I$(ZOS_PATH)/kernel_headers/z88dk-z80asm/ -O=${BUILDDIR} -o=${BIN} -b -d -l -m $(SRCS)
+	z88dk-z80asm -I$(ZOS_PATH)/kernel_headers/z88dk-z80asm/ -O=${BUILDDIR} -o=../${BIN} -b -d -l -m $(SRCS)
 
 clean:
-	rm -fr ${BUILDDIR}/*
+	rm -fr ${BUILDDIR}/* $(BIN) *.map
+
+run:
+	$(ZEAL_NATIVE_BIN) -r $(ZEAL_NATIVE_ROM) # -t tf.img -e eeprom.img
+
+native: all run
