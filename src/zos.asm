@@ -54,7 +54,6 @@
 ;  Destroys: A,B,C,D,E,H,L,F
 ;
 OSINIT:
-        di       ; disable interrupts
         KB_MODE(KB_READ_NON_BLOCK | KB_MODE_RAW)        ; default to raw keyboard for INKEYs
 
         ld a, b
@@ -133,9 +132,7 @@ OSLINE:
 
         ex de, hl
         ld bc, 254
-        ei
         S_READ1(DEV_STDIN)
-        di
         xor a
 
         push af ; save S_READ1 error
@@ -394,7 +391,6 @@ PROMPT:
 ;
 BYE:
         ld h, 0 ; Return value
-        ei
         EXIT()
 
 RESET:
@@ -442,7 +438,6 @@ OSKEY:
         push de
         push hl
 
-        ei
 @getkey:
         S_READ3(DEV_STDIN, BUFFER, 3)
         or a    ; did an error occur?
@@ -460,8 +455,6 @@ OSKEY:
         ; an error has occurred, handle it
         xor a   ; clear carry flag
 @read:
-        di
-
         pop hl
         pop de
         pop bc
