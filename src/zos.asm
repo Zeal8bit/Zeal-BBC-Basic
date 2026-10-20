@@ -211,6 +211,8 @@ OSBGET:
         ld de, BUFFER
         ld bc, 1
         READ()
+        or a
+        jp nz, SHOW_ERROR
         ; If we read 0 byte, it's the end of the file, it's not exactly how it should
         ; be done but it's the simplest solution for now
         ld a, b
@@ -241,6 +243,12 @@ OSBPUT:
         ; Byte to write in BUFFER
         ld (de), a
         WRITE()
+        or a
+        jp nz, SHOW_ERROR
+        dec bc
+        ld a, b
+        or c
+        jp nz, TRANSFER_ERROR
         pop hl
         pop de
         ret
@@ -269,8 +277,12 @@ OSLOAD:
         ld h, a
         ld bc, 0x2000   ; TODO: load data in chunks up to BC (free memory size)
         READ()
+        or a
+        jp nz, CLOSE_ERROR
         ld (OSLOAD_SIZE), bc
         CLOSE()
+        or a
+        jp nz, SHOW_ERROR
         scf   ; For now, always accept the file, do not check the size
         ret
 
@@ -297,13 +309,41 @@ OSSAVE:
         jp m, SHOW_ERROR_NEG
         ; Write the data
         ld h, a
+        push bc
         WRITE()
+        pop de
+        or a
+        jp nz, CLOSE_ERROR
+        ; Short successful writes are failures until the paged writer retries them.
+        ld a, b
+        cp d
+        jr nz, SAVE_SHORT
+        ld a, c
+        cp e
+        jr nz, SAVE_SHORT
         CLOSE()
+        or a
+        jp nz, SHOW_ERROR
         ret
+SAVE_SHORT:
+        ld a, ERR_FAILURE
+CLOSE_ERROR:
+        ; Keep the original failure even when cleanup fails too.
+        push af
+        CLOSE()
+        pop af
+        jr SHOW_ERROR
+TRANSFER_ERROR:
+        ld a, ERR_FAILURE
+        jr SHOW_ERROR
 SHOW_ERROR_NEG:
         neg
 SHOW_ERROR:
-        ret
+        ; BASIC OS errors occupy 128..255; retain the Zeal error in bits 0..6.
+        or 0x80
+        call EXTERR
+        DEFM "Zeal OS error"
+        DEFB 0
 
 
 ;OSSHUT - Close disk file(s).
@@ -317,6 +357,8 @@ OSSHUT:
     ret z
     ld h, a
     CLOSE()
+    or a
+    jp nz, SHOW_ERROR
     ret
 
 
@@ -338,10 +380,7 @@ GETEXT:
         ld de, (BUFFER + 2)
         ret
 GETEXT_ERROR:
-        ld de, 0
-        ld h, d
-        ld l, e
-        ret
+        jp SHOW_ERROR
 
 ;
 ;GETPTR - Return file pointer.
@@ -357,17 +396,14 @@ GETPTR:
         ld e, c
         ld a, SEEK_CUR
         SEEK()
+        or a
         jr nz, GETPTR_ERROR
         ld h, b
         ld l, c
         ex de, hl
         ret
 GETPTR_ERROR:
-        ; Return 0 in terms of error
-        ld de, 0
-        ld h, d
-        ld l, e
-        ret
+        jp SHOW_ERROR
 
 ;
 ;PUTPTR - Update file pointer.
@@ -384,6 +420,8 @@ PUTPTR:
         ld h, a
         ld a, SEEK_SET
         SEEK()
+        or a
+        jp nz, SHOW_ERROR
         ret
 
 
