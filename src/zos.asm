@@ -209,25 +209,115 @@ OSWRCH:
         pop af
         ret
 
-;OSLINE - Read/edit a complete line, terminated by CR.
-;   Inputs: HL addresses destination buffer.
-;           (L=0)
-;  Outputs: Buffer filled, terminated by CR.
-;           A=0.
-; Destroys: A,B,C,D,E,H,L,F
-;
+;OSLINE - Read a bounded LF-terminated line into a 256-byte buffer.
+; HL addresses the buffer (L=0). A=0 on success; errors are trappable.
 OSLINE:
         SAVE_ALTERNATES()
+        ld (hl), 10             ; even a failed/empty read leaves a safe buffer
+        push hl
         call INPUT_COOKED
+        or a
+        jr z, LINE_COOKED
+        cp ERR_NOT_SUPPORTED
+        jr z, LINE_STREAM
+        cp ERR_NOT_IMPLEMENTED
+        jr z, LINE_STREAM
+        cp ERR_INVALID_FILEDEV  ; stdin may be a redirected file
+        jr z, LINE_STREAM
+        pop hl
+        jr LINE_ERROR
+LINE_COOKED:
         ex de, hl
-        ld bc, 254
+        ld bc, 255              ; room for 254 characters plus the keyboard's LF
         ei
         S_READ1(DEV_STDIN)
         di
-        call INPUT_RAW
-        RESTORE_ALTERNATES()
+        pop hl
+        or a
+        jr nz, LINE_ERROR
+        ld a, b
+        or a
+        jr nz, LINE_INVALID
+        ld a, c
+        or a
+        jr z, LINE_EOF
+        ld e, c
+        ld d, 0
+        add hl, de
+        dec hl
+        ld a, (hl)
+        cp 10
+        jr z, LINE_SUCCESS
+        inc hl                  ; short/full reads lacking LF are terminated here
+        ld (hl), 10
+LINE_SUCCESS:
         xor a
+        jr LINE_DONE
+LINE_INVALID:
+        ld a, ERR_INVALID_PARAMETER
+        jr LINE_ERROR
+LINE_EOF:
+        ld a, ERR_NO_MORE_ENTRIES
+LINE_ERROR:
+        ld (hl), 10
+LINE_DONE:
+        push af
+        call INPUT_RAW
+        pop af
+        RESTORE_ALTERNATES()
+        or a
+        jp nz, SHOW_ERROR
         ret
+
+; Drivers without cooked keyboard support are byte streams. Read only through
+; the next LF, accepting a final unterminated line and normalizing CRLF. Drain
+; overlong lines so a later INPUT cannot mistake their remainder for a new line.
+LINE_STREAM:
+        pop hl
+        ld bc, 0                ; B = length, C = overflow flag
+LINE_STREAM_READ:
+        push hl
+        push bc
+        ei
+        S_READ3(DEV_STDIN, BUFFER, 1)
+        di
+        ld d, a
+        ld e, c
+        pop bc
+        pop hl
+        ld a, d
+        or a
+        jr nz, LINE_ERROR
+        ld a, e
+        or a
+        jr nz, LINE_STREAM_BYTE
+        ld a, b
+        or a
+        jr z, LINE_EOF
+        jr LINE_STREAM_END
+LINE_STREAM_BYTE:
+        ld a, (BUFFER)
+        cp 13
+        jr z, LINE_STREAM_READ
+        cp 10
+        jr z, LINE_STREAM_END
+        ld a, b
+        cp 255
+        jr z, LINE_STREAM_FULL
+        ld a, (BUFFER)
+        ld (hl), a
+        inc hl
+        inc b
+        jr LINE_STREAM_READ
+LINE_STREAM_FULL:
+        ld c, 1
+        jr LINE_STREAM_READ
+LINE_STREAM_END:
+        ld (hl), 10
+        ld a, c
+        or a
+        jr nz, LINE_INVALID
+        jr LINE_SUCCESS
 
 
 ;OSOPEN - Open a file for reading or writing.

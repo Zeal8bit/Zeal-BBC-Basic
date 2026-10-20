@@ -21,13 +21,14 @@ static char opened_name[256];
 static unsigned checks;
 static unsigned stop_pc;
 static int follow_basic_error;
-static uint8_t keys[128];
+static uint8_t keys[1024];
 static unsigned key_size, key_pos, keyboard_mode;
 static int inject_interrupt, interrupt_seen, escape_after_reads, input_reads;
 static int partial_release;
 static int file_exists;
 static uint8_t native_open[128], close_errors[128];
 static unsigned close_attempts[128], first_descriptor, exited;
+static int mode_failure, stdin_limit;
 static void invoke(const char *entry);
 
 static uint8_t read_ram(device_t *dev, uint32_t address) { (void)dev; return memory[address & 65535]; }
@@ -76,6 +77,7 @@ static void reset(const char *entry) {
     memset(native_open, 0, sizeof(native_open)); native_open[0] = native_open[1] = 1;
     memset(close_errors, 0, sizeof(close_errors)); memset(close_attempts, 0, sizeof(close_attempts));
     first_descriptor = 2; exited = 0;
+    mode_failure = 0; stdin_limit = -1;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0xf100, "test.bbc");
     set_hl(0xf100); set_de(0x8000); set_bc(16);
@@ -115,6 +117,10 @@ static void syscall(void) {
                 keys[key_size++] = 0xf0;
             }
             if (count > key_size - key_pos) count = key_size - key_pos;
+            if (stdin_limit >= 0 && count > (unsigned)stdin_limit) count = stdin_limit;
+            if (keyboard_mode == 1) {
+                for (unsigned i = 0; i < count; ++i) if (keys[key_pos + i] == '\n') { count = i + 1; break; }
+            }
             /* A raw read may never end with a release marker. */
             if (!partial_release && count && keys[key_pos + count - 1] == 0xfe) count--;
             memcpy(memory + address, keys + key_pos, count); key_pos += count;
@@ -148,7 +154,7 @@ static void syscall(void) {
         file_pos = next > file_size ? file_size : next;
         set_bc(file_pos >> 16); set_de(file_pos & 65535); break;
     }
-    case 7: keyboard_mode = cpu.e; break;
+    case 7: if (mode_failure) cpu.a = mode_failure; else keyboard_mode = cpu.e; break;
     case 15: exited = 1; cpu.pc = 0x3000; return;
     default: fprintf(stderr, "Unexpected syscall: %u\n", call); exit(1);
     }
@@ -480,6 +486,32 @@ static void test_characters(void) {
     reset("INPUT_COOKED"); memory[symbol("KEY_MODIFIERS")] = 31; run();
     CHECK(!memory[symbol("KEY_MODIFIERS")]);
 }
+static void test_lines(void) {
+    const unsigned lengths[] = {0, 1, 254, 255};
+    for (unsigned i = 0; i < 4; ++i) {
+        reset("OSLINE"); memset(keys, 'a', lengths[i]); keys[lengths[i]] = '\n'; key_size = lengths[i] + 1;
+        memset(memory + 0xf100, 0xaa, 257); run();
+        CHECK(!basic_error); CHECK(memory[0xf100 + lengths[i]] == '\n');
+        CHECK(memory[0xf200] == 0xaa); CHECK(keyboard_mode == 4);
+    }
+    reset("OSLINE"); memcpy(keys, "abc", 3); key_size = 3; run();
+    CHECK(!basic_error); CHECK(!memcmp(memory + 0xf100, "abc\n", 4));
+    reset("OSLINE"); fail_call = 0; run();
+    CHECK(basic_error == (128 | 19)); CHECK(memory[0xf100] == '\n'); CHECK(keyboard_mode == 4);
+    reset("OSLINE"); run(); CHECK(basic_error == (128 | 21)); CHECK(memory[0xf100] == '\n');
+    reset("OSLINE"); mode_failure = 3; stdin_limit = 1;
+    memcpy(keys, "one\r\ntwo\nlast", 13); key_size = 13; run();
+    CHECK(!basic_error); CHECK(!memcmp(memory + 0xf100, "one\n", 4)); CHECK(key_pos == 5);
+    set_hl(0xf100); invoke("OSLINE"); CHECK(!memcmp(memory + 0xf100, "two\n", 4)); CHECK(key_pos == 9);
+    set_hl(0xf100); invoke("OSLINE"); CHECK(!memcmp(memory + 0xf100, "last\n", 5));
+    set_hl(0xf100); invoke("OSLINE"); CHECK(basic_error == (128 | 21)); CHECK(memory[0xf100] == '\n');
+    reset("OSLINE"); mode_failure = 3; memset(keys, 'x', 256);
+    memcpy(keys + 256, "\nok\n", 4); key_size = 260; memory[0xf200] = 0xaa; run();
+    CHECK(basic_error == (128 | 6)); CHECK(key_pos == 257); CHECK(memory[0xf200] == 0xaa);
+    basic_error = 0; set_hl(0xf100); invoke("OSLINE");
+    CHECK(!basic_error); CHECK(!memcmp(memory + 0xf100, "ok\n", 3));
+    reset("OSLINE"); mode_failure = 1; run(); CHECK(basic_error == (128 | 1)); CHECK(input_reads == 0);
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -498,6 +530,7 @@ int main(int argc, char **argv) {
     test_bundled_loads();
     test_escape();
     test_characters();
+    test_lines();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }

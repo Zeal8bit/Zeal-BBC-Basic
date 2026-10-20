@@ -46,3 +46,7 @@ standard streams and other caller handles, failed opens, temporary load/save
 handles, repeated cleanup, close failures and retry, program END, error unwinding,
 and exit. Cleanup attempts all owned closes, retains failed handles for retry,
 and preserves the original BASIC error during best-effort error cleanup.
+
+Line-input checks cover bounded cooked reads, missing terminators, read failures,
+EOF, redirected CRLF streams and overlong-line recovery. Redirected input reads
+through one LF at a time; overlong lines are drained and reported as errors.
