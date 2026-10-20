@@ -150,6 +150,21 @@ static void test_loads(void) {
     reset("OSLOAD"); file_size = 17000; set_bc(20000); fail_transfer = 2; run();
     CHECK(basic_error == (128 | 19)); CHECK(closed == 1);
 }
+static void test_saves(void) {
+    const unsigned lengths[] = {0, 1, 16383, 16384, 16385, 28000};
+    for (unsigned i = 0; i < sizeof(lengths) / sizeof(*lengths); ++i) {
+        reset("OSSAVE"); unsigned length = lengths[i]; set_bc(length);
+        for (unsigned j = 0; j < length; ++j) memory[0x8000 + j] = (uint8_t)(j * 7);
+        run();
+        CHECK(!basic_error); CHECK(!invalid_buffer); CHECK(closed == 1);
+        CHECK(file_size == length); CHECK(!memcmp(file, memory + 0x8000, length));
+    }
+    reset("OSSAVE"); set_de(0xbffd); set_bc(10000); short_limit = 257; run();
+    CHECK(!basic_error); CHECK(!invalid_buffer); CHECK(closed == 1);
+    CHECK(file_size == 10000); CHECK(!memcmp(file, memory + 0xbffd, 10000));
+    reset("OSSAVE"); set_bc(17000); fail_transfer = 2; close_failure = 6; run();
+    CHECK(basic_error == (128 | 19)); CHECK(closed == 1);
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -157,6 +172,7 @@ int main(int argc, char **argv) {
     size_t length = fread(image + 0x4000, 1, 0xc000, fp); fclose(fp); assert(length > 0);
     test_errors();
     test_loads();
+    test_saves();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }

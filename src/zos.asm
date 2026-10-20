@@ -393,26 +393,14 @@ OSSAVE:
         ; Check for errors
         or a
         jp m, SHOW_ERROR_NEG
-        ; Write the data
         ld h, a
-        push bc
-        WRITE()
-        pop de
-        or a
-        jp nz, CLOSE_ERROR
-        ; Short successful writes are failures until the paged writer retries them.
-        ld a, b
-        cp d
-        jr nz, SAVE_SHORT
-        ld a, c
-        cp e
-        jr nz, SAVE_SHORT
+        ld (FILE_REMAIN), bc
+        ld l, 1                 ; Zeal write syscall
+        call FILE_TRANSFER
         CLOSE()
         or a
         jp nz, SHOW_ERROR
         ret
-SAVE_SHORT:
-        ld a, ERR_FAILURE
 CLOSE_ERROR:
         ; Keep the original failure even when cleanup fails too.
         push af
