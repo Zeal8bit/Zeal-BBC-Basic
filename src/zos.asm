@@ -225,7 +225,8 @@ OSLINE:
 
 ;OSOPEN - Open a file for reading or writing.
 ;   Inputs: HL addresses filename (term 0)
-;           Carry set for OPENIN, cleared for OPENOUT.
+;           Carry clear for OPENOUT, set with A=0 for OPENIN,
+;           set with A=1 for OPENUP (as supplied by the evaluator).
 ;  Outputs: A = file channel (=0 if cannot open)
 ;           DE = file FCB
 ; Destroys: A,B,C,D,E,H,L,F
@@ -235,9 +236,12 @@ OSOPEN:
         ld b, h
         ld c, l
         ; Set the flags
-        ld h, O_RDONLY
-        jr c, OSOPEN_READ
         ld h, O_WRONLY | O_CREAT | O_TRUNC
+        jr nc, OSOPEN_READ
+        ld h, O_RDONLY
+        or a
+        jr z, OSOPEN_READ
+        ld h, O_RDWR
 OSOPEN_READ:
         OPEN()
         ; Check for error, if positive, return

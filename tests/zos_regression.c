@@ -226,6 +226,25 @@ static void test_openout(void) {
     reset("OPENOT"); fail_call = 2; open_basic();
     CHECK(!basic_error); CHECK(cpu.l_ == 0);
 }
+static void test_openup(void) {
+    reset("OPENUP"); uint8_t original[16]; memcpy(original, file, sizeof(original));
+    open_basic();
+    CHECK(!basic_error); CHECK(cpu.l_ == 2); CHECK(last_flags == 2);
+    CHECK(file_size == 16); CHECK(!memcmp(file, original, 16));
+    cpu.e = 2; invoke("OSBGET"); CHECK(cpu.a == original[0]);
+    set_de(0); set_hl(0); cpu.a = 2; invoke("PUTPTR");
+    cpu.e = 2; cpu.a = 'x'; invoke("OSBPUT");
+    CHECK(!basic_error); CHECK(file_size == 16 && file[0] == 'x');
+    CHECK(!memcmp(file + 1, original + 1, 15));
+    set_de(0); set_hl(0); cpu.a = 2; invoke("PUTPTR");
+    cpu.e = 2; invoke("OSBGET"); CHECK(cpu.a == 'x');
+    reset("OPENUP"); file_exists = 0; open_basic();
+    CHECK(!basic_error); CHECK(cpu.l_ == 0); CHECK(!file_exists);
+    reset("OPENIN"); open_basic(); CHECK(last_flags == 0); CHECK(file_size == 16);
+    cpu.e = 2; invoke("OSBGET"); CHECK(cpu.a == 3);
+    cpu.e = 2; cpu.a = 'x'; invoke("OSBPUT"); CHECK(basic_error == (128 | 19));
+    reset("OPENUP"); fail_call = 2; open_basic(); CHECK(cpu.l_ == 0); CHECK(!basic_error);
+}
 static void test_chain_names(void) {
     const char *entries[] = {"CHAIN", "RUN"};
     for (unsigned i = 0; i < 2; ++i) {
@@ -345,6 +364,7 @@ int main(int argc, char **argv) {
     test_loads();
     test_saves();
     test_openout();
+    test_openup();
     test_chain_names();
     test_bundled_loads();
     test_escape();
