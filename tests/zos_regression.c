@@ -19,6 +19,8 @@ static int basic_error, invalid_buffer;
 static unsigned last_flags;
 static char opened_name[256];
 static unsigned checks;
+static char output[8192];
+static unsigned output_size, cursor_x, cursor_y, cursor_sets;
 static unsigned stop_pc;
 static int follow_basic_error;
 static uint8_t keys[1024];
@@ -75,6 +77,7 @@ static void reset(const char *entry) {
     opened = closed = transfers = basic_error = invalid_buffer = 0;
     fail_transfer = premature_eof = 0;
     file_pos = 0; file_size = 16; opened_name[0] = 0;
+    output_size = cursor_x = cursor_y = cursor_sets = 0;
     stop_pc = 0;
     follow_basic_error = 0;
     key_size = key_pos = keyboard_mode = 0;
@@ -135,7 +138,11 @@ static void syscall(void) {
             memcpy(memory + address, keys + key_pos, count); key_pos += count;
             set_bc(count); break;
         }
-        if (call == 1 && cpu.h == 0) break;
+        if (call == 1 && cpu.h == 0) {
+            assert(output_size + count < sizeof(output));
+            memcpy(output + output_size, memory + address, count);
+            output_size += count; output[output_size] = 0; break;
+        }
         if ((call == 0 && (last_flags & 3) == 1) || (call == 1 && (last_flags & 3) == 0)) {
             cpu.a = 19; break;
         }
@@ -163,7 +170,13 @@ static void syscall(void) {
         file_pos = next > file_size ? file_size : next;
         set_bc(file_pos >> 16); set_de(file_pos & 65535); break;
     }
-    case 7: if (mode_failure) cpu.a = mode_failure; else keyboard_mode = cpu.e; break;
+    case 7:
+        if (cpu.h == 0 && cpu.c == 4) {
+            cursor_x = cpu.d; cursor_y = cpu.e; cursor_sets++;
+            set_bc(0xdead); /* Driver scratch registers must not alter PRINT. */
+            break;
+        }
+        if (mode_failure) cpu.a = mode_failure; else keyboard_mode = cpu.e; break;
     case 15: exited = 1; cpu.pc = 0x3000; return;
     default: fprintf(stderr, "Unexpected syscall: %u\n", call); exit(1);
     }
@@ -593,6 +606,22 @@ static void test_commands(void) {
     CHECK(!basic_error); CHECK(!exited); CHECK(cpu.pc == stop_pc);
 
 }
+static void test_cursor_width(void) {
+    reset("PUTCSR"); set_bc(0x1234); set_de(5); set_hl(10); run();
+    CHECK(!basic_error); CHECK((cpu.b << 8 | cpu.c) == 0x1234);
+    CHECK(cursor_sets == 1 && cursor_x == 5 && cursor_y == 10);
+    for (unsigned tab = 0; tab < 2; ++tab) {
+        reset("PRINT"); program_error_location();
+        memory[symbol("STAVAR")] = 10;
+        const uint8_t plain[] = {'1',':',0xe0,10,0};
+        const uint8_t positioned[] = {0x8a,'5',',','1','0',')','1',':',0xe0,10,0};
+        memcpy(memory + 0xf200, tab ? positioned : plain, tab ? sizeof(positioned) : sizeof(plain));
+        cpu.iy = 0xf200; cpu.a = memory[cpu.iy]; stop_pc = symbol("CLOOP"); run();
+        CHECK(!basic_error); CHECK(output_size == 11); CHECK(!memcmp(output, "         1\n",11));
+        CHECK(cursor_sets == tab);
+        if (tab) CHECK(cursor_x == 5 && cursor_y == 10);
+    }
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -615,6 +644,7 @@ int main(int argc, char **argv) {
     test_lines();
     test_arguments();
     test_commands();
+    test_cursor_width();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }

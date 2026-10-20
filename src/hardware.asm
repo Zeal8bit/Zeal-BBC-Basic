@@ -64,6 +64,7 @@ CLRSCN:
 ;		  HL = vertical position (TOP=0)
 ; 	  Destroys: A,D,E,H,L,F
 PUTCSR:
+        push bc                 ; PRINT keeps field width and format in BC
         ld (TEXTX), de		;SAVE X & Y FOR LATER
         ld (TEXTY), hl
         ld h, DEV_STDOUT
@@ -73,6 +74,7 @@ PUTCSR:
         ld a, (TEXTY)
         ld e, a
         IOCTL()
+        pop bc
         ret
 
 ;GETCSR	- Return cursor coordinates.
