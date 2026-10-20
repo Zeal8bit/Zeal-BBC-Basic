@@ -26,6 +26,14 @@ Polling retains up to 16 ordinary keypresses; additional keys are dropped while
 the queue is full, but Escape is still recognized. Non-keyboard redirected
 input is not polled; GET continues to read it as a byte stream.
 
+Raw GET/GET$ input translates left/right Shift and Ctrl, Caps Lock, US-ASCII
+shifted punctuation and keypad characters. Modifier keys and unsupported
+non-character keys are not returned as characters. Modifier state is cleared
+when entering cooked input: the current keyboard API exposes neither the cooked
+modifier/lock state nor a nonblocking character-translation service. Consequently
+non-US shifted punctuation and modifiers already held across that mode change
+are not inferred by this port.
+
 OS failures reported by this port use BASIC `ERR = 128 + Zeal OS error code`
 and the message `Zeal OS error`. `OPENIN`/`OPENOUT`/`OPENUP` retain their BASIC
 contract of returning channel zero when opening fails.

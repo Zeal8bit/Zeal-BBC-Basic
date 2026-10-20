@@ -182,6 +182,7 @@ INPUT_COOKED:
         push hl
         xor a
         ld (RAW_INPUT), a
+        ld (KEY_MODIFIERS), a
         ld h, DEV_STDIN
         ld c, KB_CMD_SET_MODE
         ld de, KB_READ_BLOCK | KB_MODE_COOKED
@@ -728,6 +729,7 @@ KEY_READ: DEFB 0
 KEY_WRITE: DEFB 0
 KEY_QUEUE: DEFS 16
 KEY_EVENTS: DEFS 2
+KEY_MODIFIERS: DEFB 0            ; L/R Shift, L/R Ctrl, Caps Lock, Caps key down
 
 ;LTRAP - Poll and abort on Escape. Preserve all register pairs, including
 ; alternate registers: Zeal interrupt handlers are allowed to use them.
@@ -785,27 +787,145 @@ POLL_EVENT:
         ; ignore it without reading beyond the buffer or wrapping the counter.
         dec b
         jr z, POLL_DONE
+        ld a, (hl)
         inc hl
-        jr POLL_NEXT
+        ld e, 0                 ; released event
+        jr POLL_TRANSLATE
 POLL_PRESS:
-        cp KB_ESC
-        jr z, POLL_ESCAPE
-        cp 27                   ; ASCII Escape on compatible input drivers
-        jr z, POLL_ESCAPE
+        ld e, 1                 ; pressed event
+POLL_TRANSLATE:
         push bc
         push hl
-        call KEY_ENQUEUE
+        call KEY_EVENT
         pop hl
         pop bc
-        jr POLL_NEXT
-POLL_ESCAPE:
-        ld a, 1
-        ld (ESC_PENDING), a
 POLL_NEXT:
         djnz POLL_EVENT
 POLL_DONE:
         RESTORE_ALTERNATES()
         ret
+
+; Raw keyboard events -> US-ASCII characters. Modifier-only and unsupported
+; special keys produce no character. E=1 for a press, E=0 for a release.
+KEY_EVENT:
+        ld c, a
+        ld d, 1
+        cp KB_LEFT_SHIFT
+        jp z, KEY_MODIFIER
+        ld d, 2
+        cp KB_RIGHT_SHIFT
+        jp z, KEY_MODIFIER
+        ld d, 4
+        cp KB_LEFT_CTRL
+        jp z, KEY_MODIFIER
+        ld d, 8
+        cp KB_RIGHT_CTRL
+        jp z, KEY_MODIFIER
+        cp KB_CAPS_LOCK
+        jp z, KEY_CAPS
+        ld a, e
+        or a
+        ret z
+        ld a, c
+        cp KB_ESC
+        jp z, KEY_ESCAPE_EVENT
+        cp 27
+        jp z, KEY_ESCAPE_EVENT
+        cp 0x80
+        jr nc, KEY_KEYPAD
+        ; Ctrl-letters and Ctrl-@.._ produce ASCII control codes.
+        ld a, (KEY_MODIFIERS)
+        and 12
+        jr z, KEY_PRINTABLE
+        ld a, c
+        and 0xdf
+        cp '@'
+        jr c, KEY_PRINTABLE
+        cp 0x60
+        jr nc, KEY_PRINTABLE
+        and 31
+        jp KEY_ENQUEUE
+KEY_PRINTABLE:
+        ld a, c
+        cp 'a'
+        jr c, KEY_PUNCTUATION
+        cp 'z' + 1
+        jr nc, KEY_PUNCTUATION
+        ld a, (KEY_MODIFIERS)
+        ld d, a
+        and 3
+        ld a, d
+        jr z, KEY_LETTER_CASE
+        xor 16
+KEY_LETTER_CASE:
+        and 16
+        ld a, c
+        jp z, KEY_ENQUEUE
+        and 0xdf
+        jp KEY_ENQUEUE
+KEY_PUNCTUATION:
+        ld a, (KEY_MODIFIERS)
+        and 3
+        ld a, c
+        jp z, KEY_ENQUEUE
+        ld hl, KEY_SHIFT_BASE
+        ld bc, KEY_SHIFT_SIZE
+        cpir
+        jp nz, KEY_ENQUEUE
+        ld de, KEY_SHIFTED - KEY_SHIFT_BASE - 1
+        add hl, de
+        ld a, (hl)
+        jp KEY_ENQUEUE
+KEY_KEYPAD:
+        sub KB_NUMPAD_0
+        cp 16
+        ret nc
+        ld e, a
+        ld d, 0
+        ld hl, KEY_PAD_ASCII
+        add hl, de
+        ld a, (hl)
+        jp KEY_ENQUEUE
+KEY_MODIFIER:
+        ld a, e
+        or a
+        ld a, (KEY_MODIFIERS)
+        jr z, KEY_MODIFIER_UP
+        or d
+        jr KEY_MODIFIER_STORE
+KEY_MODIFIER_UP:
+        ld e, a
+        ld a, d
+        cpl
+        and e
+KEY_MODIFIER_STORE:
+        ld (KEY_MODIFIERS), a
+        ret
+KEY_CAPS:
+        ld a, e
+        or a
+        ld a, (KEY_MODIFIERS)
+        jr z, KEY_CAPS_UP
+        bit 5, a
+        ret nz                  ; ignore repeated presses until the release
+        xor 16
+        or 32
+        jr KEY_MODIFIER_STORE
+KEY_CAPS_UP:
+        and 0xdf
+        jr KEY_MODIFIER_STORE
+KEY_ESCAPE_EVENT:
+        ld a, 1
+        ld (ESC_PENDING), a
+        ret
+
+KEY_SHIFT_BASE:
+        DEFB "1234567890-=[]", 0x5c, 0x3b, 0x27, 0x2c, 0x2e, 0x2f, 0x60
+DEFC KEY_SHIFT_SIZE = $ - KEY_SHIFT_BASE
+KEY_SHIFTED:
+        DEFB "!@#$%^&*()_+{}", 0x7c, 0x3a, 0x22, 0x3c, 0x3e, 0x3f, 0x7e
+KEY_PAD_ASCII:
+        DEFB "0123456789.", 10, "+-*/"
 
 ; Retain ordinary keypresses for GET while polling for Escape. Like the
 ; hardware FIFO, this bounded queue drops new keys when full, but polling

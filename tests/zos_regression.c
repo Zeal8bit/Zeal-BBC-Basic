@@ -460,6 +460,26 @@ static void test_escape(void) {
     CHECK(!cpu.zf); CHECK(memory[symbol("RAW_INPUT")] == 1);
     CHECK(!memcmp(memory + symbol("ACCS"), "test.bbc", 8));
 }
+static void test_characters(void) {
+    const uint8_t events[] = {0x93, 'a', 0x96, 0xfe, 0x93, 'b', 0xfe, 0x96, 'c',
+                             0x92, 0x92, 'd', 0xfe, 0x92, 0x93, 'e', 0xfe, 0x93, 0x92, 0xfe, 0x92, 0x95, 'f',
+                             0xfe, 0x95, 0x93, '1', '/', 0xfe, 0x93, 0x80, 0x8b,
+                             0x94, 0xa0, 'z'};
+    const uint8_t expected[] = {'A', 'B', 'c', 'D', 'e', 6, '!', '?', '0', 10, 'z'};
+    reset("LTRAP"); prepare_keyboard(); memcpy(keys, events, sizeof(events)); key_size = sizeof(events);
+    while (key_pos < key_size) invoke("LTRAP");
+    CHECK(!basic_error); CHECK(memory[symbol("KEY_COUNT")] == sizeof(expected));
+    for (unsigned i = 0; i < sizeof(expected); ++i) {
+        invoke("OSRDCH"); CHECK(cpu.a == expected[i]);
+    }
+    reset("OSRDCH"); prepare_keyboard();
+    const uint8_t control[] = {0x98, 0x95, 0xfe, 0x98, '[', 0xfe, 0x95, 'x'};
+    memcpy(keys, control, sizeof(control)); key_size = sizeof(control);
+    run(); CHECK(cpu.a == 27); CHECK(!memory[symbol("ESC_PENDING")]);
+    invoke("OSRDCH"); CHECK(cpu.a == 'x');
+    reset("INPUT_COOKED"); memory[symbol("KEY_MODIFIERS")] = 31; run();
+    CHECK(!memory[symbol("KEY_MODIFIERS")]);
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -477,6 +497,7 @@ int main(int argc, char **argv) {
     test_chain_names();
     test_bundled_loads();
     test_escape();
+    test_characters();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }
