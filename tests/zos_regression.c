@@ -80,6 +80,8 @@ static void reset(const char *entry) {
     mode_failure = 0; stdin_limit = -1;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0xf100, "test.bbc");
+    memory[symbol("PAGE") + 1] = 0x80;
+    memory[symbol("TOP")] = 3; memory[symbol("TOP") + 1] = 0x80;
     set_hl(0xf100); set_de(0x8000); set_bc(16);
 }
 static void syscall(void) {
@@ -217,6 +219,27 @@ static void test_loads(void) {
     CHECK(basic_error == (128 | 1)); CHECK(closed == 1);
     reset("OSLOAD"); file_size = 17000; set_bc(20000); fail_transfer = 2; run();
     CHECK(basic_error == (128 | 19)); CHECK(closed == 1);
+}
+static void test_validation(void) {
+    const uint8_t cases[][8] = {
+        {0}, {0,255}, {0,255,0}, {1,0,0}, {2,0,0}, {3,0,10},
+        {5,0,0,10}, {4,0,0,0,0,255,255}, {4,0,0,10},
+        {4,0,0,10,0,255,255}, {0,255,255,99}
+    };
+    const unsigned sizes[] = {0,2,3,3,3,3,4,7,4,7,4};
+    for (unsigned i = 0; i < 11; ++i) {
+        reset("LOAD0"); memcpy(file, cases[i], 8); file_size = sizes[i];
+        strcpy((char *)memory + symbol("ACCS"), "test.bbc");
+        stop_pc = i < 9 ? symbol("NEW") : 0x3000; run();
+        CHECK(!basic_error); CHECK(cpu.pc == stop_pc);
+        if (i < 9) CHECK(memory[0x8000] == 0);
+        else CHECK(memory[symbol("TOP")] == (i == 9 ? 7 : 3));
+    }
+    reset("LOAD0"); strcpy((char *)memory + symbol("ACCS"), "test.bbc");
+    file_size = 100; fail_transfer = 2; short_limit = 4;
+    memory[symbol("ERRTRP")] = 123; run();
+    CHECK(basic_error == (128 | 19)); CHECK(memory[0x8000] == 0);
+    CHECK(memory[symbol("ERRTRP")] == 0); CHECK(memory[symbol("TOP")] == 3);
 }
 static void test_saves(void) {
     const unsigned lengths[] = {0, 1, 16383, 16384, 16385, 28000};
@@ -520,6 +543,7 @@ int main(int argc, char **argv) {
     CHECK(symbol("__tail") <= symbol("USER"));
     test_errors();
     test_loads();
+    test_validation();
     test_saves();
     test_openout();
     test_openup();

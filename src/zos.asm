@@ -6,6 +6,7 @@
         PUBLIC	OSWRCH
         PUBLIC	OSLINE
         PUBLIC	OSSAVE
+        PUBLIC	OSLOAD_SIZE
         PUBLIC	OSLOAD
         PUBLIC	OSOPEN
         PUBLIC	OSSHUT
@@ -24,6 +25,7 @@
         PUBLIC	OSKEY
         PUBLIC	OSCALL
 ;
+        EXTERN	LOADFAIL
         EXTERN	ESCAPE
         EXTERN	EXTERR
         EXTERN	CHECK
@@ -500,6 +502,8 @@ OSBPUT:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSLOAD:
+        xor a
+        ld (LOAD_ACTIVE), a
         push de
         push bc
         ld b, h
@@ -549,6 +553,8 @@ LOAD_STAT_ERROR:
         pop hl
         jp CLOSE_ERROR
 LOAD_FITS:
+        ld a, 1
+        ld (LOAD_ACTIVE), a
         ld bc, (BUFFER + 1)
         ld (OSLOAD_SIZE), bc
         ld (FILE_REMAIN), bc
@@ -557,9 +563,12 @@ LOAD_FITS:
         call FILE_CLOSE
         or a
         jp nz, SHOW_ERROR
+        xor a
+        ld (LOAD_ACTIVE), a
         scf
         ret
 
+LOAD_ACTIVE: DEFB 0
 OSLOAD_SIZE: DEFW 0
 FILE_REMAIN: DEFW 0
 
@@ -620,6 +629,8 @@ FILE_CHUNK_READY:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSSAVE:
+        xor a
+        ld (LOAD_ACTIVE), a
         ; Open the file for writing
         push de
         push bc
@@ -652,6 +663,13 @@ TRANSFER_ERROR:
 SHOW_ERROR_NEG:
         neg
 SHOW_ERROR:
+        push af
+        ld a, (LOAD_ACTIVE)
+        or a
+        call nz, LOADFAIL
+        xor a
+        ld (LOAD_ACTIVE), a
+        pop af
         ; BASIC OS errors occupy 128..255; retain the Zeal error in bits 0..6.
         or 0x80
         call EXTERR

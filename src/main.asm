@@ -20,6 +20,7 @@
         EXTERN	OSWRCH
         EXTERN	OSLINE
         EXTERN	OSINIT
+        EXTERN	OSLOAD_SIZE
         EXTERN	OSLOAD
         EXTERN	OSSAVE
         EXTERN	OSBGET
@@ -60,6 +61,7 @@
         PUBLIC	CLEAR
         PUBLIC	CRLF
         PUBLIC	SAYLN
+        PUBLIC	LOADFAIL
         PUBLIC	LOAD0
         PUBLIC	TELL
         PUBLIC	FINDL
@@ -1195,6 +1197,65 @@ LOAD0:	LD	DE,(PAGE)
         CALL	NC,NEWIT
         LD	A,0
         JP	NC,ERROR	;"No room"
+        ; Validate only bytes supplied by OSLOAD, before SETTOP can walk them.
+        LD      HL,(PAGE)
+        LD      DE,(OSLOAD_SIZE)
+LOAD_RECORD:
+        LD      A,D
+        OR      E
+        JR      Z,LOAD_BAD
+        LD      C,(HL)
+        LD      B,0
+        LD      A,C
+        OR      A
+        JR      Z,LOAD_END
+        CP      4
+        JR      C,LOAD_BAD
+        EX      DE,HL
+        OR      A
+        SBC     HL,BC
+        EX      DE,HL
+        JR      C,LOAD_BAD
+        ADD     HL,BC
+        JR      C,LOAD_BAD
+        DEC     HL
+        LD      A,(HL)
+        INC     HL
+        CP      LF
+        JR      Z,LOAD_RECORD
+        JR      LOAD_BAD
+LOAD_END:
+        LD      A,D
+        OR      A
+        JR      NZ,LOAD_MARKER
+        LD      A,E
+        CP      3
+        JR      C,LOAD_BAD
+LOAD_MARKER:
+        INC     HL
+        LD      A,(HL)
+        INC     HL
+        AND     (HL)
+        INC     HL
+        INC     A
+        JR      NZ,LOAD_BAD
+        LD      (TOP),HL
+        JP      CLEAR
+LOAD_BAD:
+        CALL    LOADFAIL
+        JP      BAD
+; A failed transfer may already have overwritten the previous program. Discard
+; its text and handler before error reporting can inspect either one.
+LOADFAIL:
+        PUSH    AF
+        CALL    NEWIT
+        XOR     A
+        LD      (ERRTRP),A
+        LD      (ERRTRP+1),A
+        LD      (ERRLIN),A
+        LD      (ERRLIN+1),A
+        POP     AF
+        RET
 CLEAN:	CALL	SETTOP
         DEC	HL
         LD	(HL),-1		;WRITE &FFFF
