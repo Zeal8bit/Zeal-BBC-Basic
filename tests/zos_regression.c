@@ -19,6 +19,7 @@ static int basic_error, invalid_buffer;
 static unsigned last_flags;
 static char opened_name[256];
 static unsigned checks;
+static unsigned stop_pc;
 
 static uint8_t read_ram(device_t *dev, uint32_t address) { (void)dev; return memory[address & 65535]; }
 static void write_ram(device_t *dev, uint32_t address, uint8_t value) { (void)dev; memory[address & 65535] = value; }
@@ -54,6 +55,7 @@ static void reset(const char *entry) {
     opened = closed = transfers = basic_error = invalid_buffer = 0;
     fail_transfer = premature_eof = 0;
     file_pos = 0; file_size = 16; opened_name[0] = 0;
+    stop_pc = 0;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0x7c00, "test.bbc");
     set_hl(0x7c00); set_de(0x8000); set_bc(16);
@@ -103,7 +105,7 @@ static void syscall(void) {
 static void run(void) {
     unsigned error_entry = symbol("EXTERR");
     for (unsigned step = 0; step < 2000000; ++step) {
-        if (cpu.pc == 0x3000) return;
+        if (cpu.pc == 0x3000 || (stop_pc && cpu.pc == stop_pc)) return;
         if (cpu.pc == error_entry) { basic_error = cpu.a; return; }
         if (cpu.pc == 8) syscall(); else z80_step(&cpu);
     }
@@ -165,6 +167,22 @@ static void test_saves(void) {
     reset("OSSAVE"); set_bc(17000); fail_transfer = 2; close_failure = 6; run();
     CHECK(basic_error == (128 | 19)); CHECK(closed == 1);
 }
+static void test_chain_names(void) {
+    const char *entries[] = {"CHAIN", "RUN"};
+    for (unsigned i = 0; i < 2; ++i) {
+        reset(entries[i]);
+        unsigned accs = symbol("ACCS"), himem = symbol("HIMEM"), page = symbol("PAGE");
+        memset(memory + accs, 'X', 256);
+        strcpy((char *)memory + 0x7d00, "\"test.bbc\"\n"); cpu.iy = 0x7d00;
+        memory[himem] = 0; memory[himem + 1] = 0xf7;
+        memory[page] = 0; memory[page + 1] = 0x80;
+        file_size = 3; file[0] = 0; file[1] = file[2] = 0xff;
+        stop_pc = symbol("RUN0"); run();
+        CHECK(!basic_error); CHECK(!strcmp(opened_name, "test.bbc"));
+        CHECK(opened == 1); CHECK(closed == 1); CHECK(file_pos == 3);
+        CHECK(cpu.pc == stop_pc);
+    }
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -173,6 +191,7 @@ int main(int argc, char **argv) {
     test_errors();
     test_loads();
     test_saves();
+    test_chain_names();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }

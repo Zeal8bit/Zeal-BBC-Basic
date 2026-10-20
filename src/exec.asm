@@ -203,7 +203,7 @@ CMDTAB:	DEFW	AUTO
 RUN:	CALL	TERMQ
         JR	Z,RUN0
 CHAIN:	CALL	EXPRS
-        LD	A,LF
+        XOR	A               ; Zeal filenames are NUL-terminated
         LD	(DE),A
 CHAIN0:	LD	SP,(HIMEM)
         CALL	LOAD0
