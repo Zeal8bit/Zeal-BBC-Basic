@@ -256,10 +256,47 @@ OSOPEN_ERROR:
 ;   Inputs: E = file channel
 ;  Outputs: Z flag set - EOF
 ;           (If Z then A=0)
-;           DE = address of file block.
 ; Destroys: A,D,E,H,L,F
 ;
 OSSTAT:
+        push bc
+        ld h, e
+        ld bc, 0
+        ld de, 0
+        ld a, SEEK_CUR
+        SEEK()                  ; inspect the position without consuming a byte
+        or a
+        jp nz, SHOW_ERROR
+        push bc
+        push de
+        ld de, BUFFER
+        DSTAT()
+        or a
+        jp nz, SHOW_ERROR
+        pop de                  ; BCDE = current position
+        pop bc
+        ; Compare the full 32-bit size with the position, most significant first.
+        ld a, (BUFFER + 4)
+        cp b
+        jr nz, FILE_EOF_COMPARE
+        ld a, (BUFFER + 3)
+        cp c
+        jr nz, FILE_EOF_COMPARE
+        ld a, (BUFFER + 2)
+        cp d
+        jr nz, FILE_EOF_COMPARE
+        ld a, (BUFFER + 1)
+        cp e
+FILE_EOF_COMPARE:
+        jr c, FILE_AT_EOF        ; also EOF if the file shrank below the position
+        jr z, FILE_AT_EOF
+        ld a, 1
+        or a                    ; NZ: bytes remain
+        pop bc
+        ret
+FILE_AT_EOF:
+        xor a                   ; Z: position is at/past the end
+        pop bc
         ret
 
 

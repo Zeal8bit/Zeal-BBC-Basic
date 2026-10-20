@@ -245,6 +245,30 @@ static void test_openup(void) {
     cpu.e = 2; cpu.a = 'x'; invoke("OSBPUT"); CHECK(basic_error == (128 | 19));
     reset("OPENUP"); fail_call = 2; open_basic(); CHECK(cpu.l_ == 0); CHECK(!basic_error);
 }
+static void test_eof(void) {
+    const uint32_t sizes[] = {0, 3, 3, 3, 65537, 65537, 0x12345678, 0x12345678};
+    const uint32_t positions[] = {0, 0, 2, 3, 65536, 65537, 0x12345677, 0x12345678};
+    for (unsigned i = 0; i < sizeof(sizes) / sizeof(*sizes); ++i) {
+        reset("OSSTAT"); cpu.e = 2; file_size = sizes[i]; file_pos = positions[i];
+        set_bc(0xabcd); cpu.zf = i & 1; run();
+        CHECK(!basic_error); CHECK(cpu.zf == (positions[i] == sizes[i]));
+        CHECK(!cpu.zf || cpu.a == 0); CHECK(file_pos == positions[i]);
+        CHECK(cpu.b == 0xab && cpu.c == 0xcd); CHECK(transfers == 0);
+    }
+    reset("OSSTAT"); cpu.e = 2; file_size = 1; run(); CHECK(!cpu.zf);
+    cpu.e = 2; invoke("OSSTAT"); CHECK(!cpu.zf); CHECK(file_pos == 0);
+    cpu.e = 2; invoke("OSBGET"); CHECK(cpu.a == 3);
+    cpu.e = 2; invoke("OSSTAT"); CHECK(cpu.zf); CHECK(file_pos == 1);
+    reset("OSSTAT"); cpu.e = 2; fail_call = 6; failure = 13; run(); CHECK(basic_error == (128 | 13));
+    reset("OSSTAT"); cpu.e = 2; fail_call = 4; run(); CHECK(basic_error == (128 | 19));
+    /* The evaluator must translate the adapter's Z flag to BASIC TRUE/FALSE. */
+    for (int eof = 0; eof < 2; ++eof) {
+        reset("EOF"); file_size = 1; file_pos = eof;
+        strcpy((char *)memory + 0x7d00, "#2\n"); cpu.iy = 0x7d00; run();
+        uint32_t value = (uint32_t)cpu.h << 24 | (uint32_t)cpu.l << 16 | cpu.h_ << 8 | cpu.l_;
+        CHECK(!basic_error); CHECK(value == (eof ? UINT32_MAX : 0));
+    }
+}
 static void test_chain_names(void) {
     const char *entries[] = {"CHAIN", "RUN"};
     for (unsigned i = 0; i < 2; ++i) {
@@ -365,6 +389,7 @@ int main(int argc, char **argv) {
     test_saves();
     test_openout();
     test_openup();
+    test_eof();
     test_chain_names();
     test_bundled_loads();
     test_escape();
