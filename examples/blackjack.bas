@@ -191,7 +191,7 @@
  1910 DEFPROCgetscore
  1920 score%(player%)=value%
  1930 ENDPROC
- 1940 DEFPROCwhoonez 
+ 1940 DEFPROCwhoone
  1950 FOR scores%=1 TO numplayer%
  1960   PRINT playname$(scores%);" got a total score of ";score%(scores%)
  1970   PRINT "using ";numofcards%(scores%);" press enter too continue..."
