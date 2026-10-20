@@ -269,6 +269,19 @@ static void test_eof(void) {
         CHECK(!basic_error); CHECK(value == (eof ? UINT32_MAX : 0));
     }
 }
+static void test_ext(void) {
+    const uint32_t sizes[] = {0, 3, 255, 256, 65535, 65536, 0x12345678};
+    for (unsigned i = 0; i < sizeof(sizes) / sizeof(*sizes); ++i) {
+        reset("GETEXT"); cpu.e = 2; file_size = sizes[i]; file_pos = 1; run();
+        uint32_t value = (uint32_t)cpu.d << 24 | (uint32_t)cpu.e << 16 | cpu.h << 8 | cpu.l;
+        CHECK(!basic_error); CHECK(value == sizes[i]); CHECK(file_pos == 1);
+        reset("EXT"); file_size = sizes[i];
+        strcpy((char *)memory + 0x7d00, "#2\n"); cpu.iy = 0x7d00; run();
+        value = (uint32_t)cpu.h << 24 | (uint32_t)cpu.l << 16 | cpu.h_ << 8 | cpu.l_;
+        CHECK(!basic_error); CHECK(value == sizes[i]);
+    }
+    reset("GETEXT"); cpu.e = 2; fail_call = 4; run(); CHECK(basic_error == (128 | 19));
+}
 static void test_chain_names(void) {
     const char *entries[] = {"CHAIN", "RUN"};
     for (unsigned i = 0; i < 2; ++i) {
@@ -390,6 +403,7 @@ int main(int argc, char **argv) {
     test_openout();
     test_openup();
     test_eof();
+    test_ext();
     test_chain_names();
     test_bundled_loads();
     test_escape();

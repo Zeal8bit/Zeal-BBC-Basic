@@ -548,12 +548,12 @@ GETEXT:
         ld h, e
         ld de, BUFFER
         DSTAT()
-        ; Check the error, return 0 in that case
+        ; Report errors before interpreting the stat buffer.
         or a
         jr nz, GETEXT_ERROR
-        ; Dereference the size from the structure
-        ld hl, (BUFFER)
-        ld de, (BUFFER + 2)
+        ; Skip s_flags; s_size is a little-endian 32-bit value at offset 1.
+        ld hl, (BUFFER + 1)
+        ld de, (BUFFER + 3)
         ret
 GETEXT_ERROR:
         jp SHOW_ERROR
