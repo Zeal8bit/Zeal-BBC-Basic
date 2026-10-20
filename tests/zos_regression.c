@@ -30,7 +30,7 @@ static int partial_release;
 static int file_exists;
 static uint8_t native_open[128], close_errors[128];
 static unsigned close_attempts[128], first_descriptor, exited;
-static int mode_failure, stdin_limit;
+static int mode_failure, stdin_limit, clobber_syscall_alternates;
 static void invoke(const char *entry);
 
 static uint8_t read_ram(device_t *dev, uint32_t address) { (void)dev; return memory[address & 65535]; }
@@ -71,7 +71,7 @@ static void return_to_caller(void) {
 }
 static void reset(const char *entry) {
     memcpy(memory, image, sizeof(memory)); z80_init(&cpu);
-    cpu.pc = symbol(entry); cpu.sp = 0xf700;
+    cpu.pc = symbol(entry); cpu.sp = 0xf600;
     memory[cpu.sp] = 0; memory[cpu.sp + 1] = 0x30;
     fail_call = -1; failure = 19; close_failure = 0; short_limit = -1;
     opened = closed = transfers = basic_error = invalid_buffer = 0;
@@ -87,7 +87,7 @@ static void reset(const char *entry) {
     memset(native_open, 0, sizeof(native_open)); native_open[0] = native_open[1] = 1;
     memset(close_errors, 0, sizeof(close_errors)); memset(close_attempts, 0, sizeof(close_attempts));
     first_descriptor = 2; exited = 0;
-    mode_failure = 0; stdin_limit = -1;
+    mode_failure = 0; stdin_limit = -1; clobber_syscall_alternates = 0;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0xf100, "test.bbc");
     memory[symbol("PAGE") + 1] = 0x80;
@@ -180,6 +180,11 @@ static void syscall(void) {
     case 15: exited = 1; cpu.pc = 0x3000; return;
     default: fprintf(stderr, "Unexpected syscall: %u\n", call); exit(1);
     }
+    if (clobber_syscall_alternates) {
+        /* A real ISR may use the alternate bank while kernel pages are mapped. */
+        assert(cpu.i == 0x21);
+        cpu.a_ = cpu.f_ = cpu.b_ = cpu.c_ = cpu.d_ = cpu.e_ = cpu.h_ = cpu.l_ = 0xaa;
+    }
     /* Zeal returns status in A. Deliberately do not promise meaningful flags. */
     cpu.zf = false; cpu.cf = true;
     return_to_caller();
@@ -190,7 +195,7 @@ static void run(void) {
         if (cpu.pc == 0x3000 || (stop_pc && cpu.pc == stop_pc)) return;
         if (cpu.pc == error_entry && !follow_basic_error) { basic_error = cpu.a; return; }
         if (inject_interrupt && cpu.iff1) {
-            inject_interrupt = 0; z80_gen_int(&cpu, 0xff);
+            inject_interrupt = 0; z80_gen_int(&cpu, cpu.interrupt_mode == 2 ? 2 : 0xff);
         }
         if (cpu.pc == 0x2000) interrupt_seen++;
         if (cpu.pc == 8) syscall(); else z80_step(&cpu);
@@ -439,18 +444,24 @@ static void prepare_keyboard(void) {
                           0x21, 0xee, 0xff, 0xd9, 0x08, 0x3e, 0x55,
                           0xb7, 0x08, 0xfb, 0xed, 0x4d};
     memcpy(memory + 0x2000, isr, sizeof(isr));
-    memory[0x38] = 0xc3; memory[0x39] = 0; memory[0x3a] = 0x20;
-    cpu.interrupt_mode = 1; inject_interrupt = 1;
+    memory[0x2100] = memory[0x2102] = 0;
+    memory[0x2101] = memory[0x2103] = 0x20;
+    cpu.i = 0x21; cpu.interrupt_mode = 2;
+    z80 entry = cpu;
+    invoke("IRQ_INIT");
+    cpu = entry; cpu.i = 0xf7; cpu.iff1 = cpu.iff2 = 1;
+    memory[cpu.sp] = 0; memory[cpu.sp + 1] = 0x30;
+    inject_interrupt = 1;
 }
 static void check_alternates(void) {
-    CHECK(interrupt_seen == 1); CHECK(!cpu.iff1);
+    CHECK(interrupt_seen == 1); CHECK(cpu.iff1);
     CHECK(cpu.a_ == 0x12 && cpu.f_ == 0x34);
     CHECK(cpu.b_ == 0x56 && cpu.c_ == 0x78);
     CHECK(cpu.d_ == 0x9a && cpu.e_ == 0xbc);
     CHECK(cpu.h_ == 0xde && cpu.l_ == 0xf0);
 }
 static void invoke(const char *entry) {
-    cpu.pc = symbol(entry); cpu.sp = 0xf700;
+    cpu.pc = symbol(entry); cpu.sp = 0xf600;
     memory[cpu.sp] = 0; memory[cpu.sp + 1] = 0x30;
     run();
 }
@@ -563,7 +574,7 @@ static void test_arguments(void) {
         set_bc(length); set_de(0xe000); run();
         CHECK(!basic_error); CHECK(!exited); CHECK(cpu.zf == (length == 0 || length > 255));
         CHECK(memory[acc + 256] == 0xaa);
-        CHECK((cpu.h << 8 | cpu.l) == symbol("USER")); CHECK((cpu.d << 8 | cpu.e) == 0xf800);
+        CHECK((cpu.h << 8 | cpu.l) == symbol("USER")); CHECK((cpu.d << 8 | cpu.e) == 0xf700);
         if (length <= 255) {
             CHECK(memory[acc + length] == 0);
             for (unsigned j = 0; j < length; ++j) CHECK(memory[acc + j] == 'a');
@@ -713,6 +724,23 @@ static void test_blackjack_procedure(void) {
     CHECK(strstr(output, "using 2 press enter too continue...") != NULL);
     CHECK(key_pos == 1);
 }
+static void test_irq_vectors(void) {
+    for (unsigned vector = 0; vector <= 2; vector += 2) {
+        reset("LTRAP"); prepare_keyboard(); inject_interrupt = 0;
+        CHECK(cpu.i == 0xf7); CHECK(memory[0x2101] == 0x20 && memory[0x2103] == 0x20);
+        set_bc(0x1234); set_de(0x5678); set_hl(0x9abc);
+        memory[0x3100] = 0; memory[0x3101] = 0xc3;
+        memory[0x3102] = 0; memory[0x3103] = 0x30; cpu.pc = 0x3100;
+        z80_gen_int(&cpu, vector); run(); check_alternates();
+        CHECK((cpu.b << 8 | cpu.c) == 0x1234);
+        CHECK((cpu.d << 8 | cpu.e) == 0x5678);
+        CHECK((cpu.h << 8 | cpu.l) == 0x9abc);
+        clobber_syscall_alternates = 1;
+        cpu.a = 'x'; invoke("OSWRCH"); CHECK(cpu.i == 0xf7); check_alternates();
+        clobber_syscall_alternates = 0;
+        invoke("BYE"); CHECK(exited); CHECK(cpu.i == 0x21);
+    }
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -738,6 +766,7 @@ int main(int argc, char **argv) {
     test_cursor_width();
     test_hamurabi_source();
     test_blackjack_procedure();
+    test_irq_vectors();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }

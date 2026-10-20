@@ -20,8 +20,12 @@ Keyboard checks inject an interrupt handler that destroys the alternate CPU
 register bank. They verify that polling and blocking input preserve BASIC's
 registers, Escape releases are ignored, ordinary keys remain available to GET,
 and an infinite GOTO loop can return to the prompt with error 17 (Escape).
-Interrupts remain disabled during interpreter arithmetic and are serviced in
-guarded polling windows every 20 execution checks, and during blocking input.
+Private IM2 wrappers preserve the alternate bank while delegating the standard
+Zeal default and PIO interrupts to the kernel. Interrupts remain enabled during
+arithmetic and device reads; keyboard events are polled every 20 execution checks.
+The syscall adapter restores the kernel's vector table while the kernel remaps
+user RAM, and the parent's original I register is restored on exit. A private
+vector page lowers initial HIMEM from &F800 to &F700 (256 bytes less BASIC memory).
 Polling retains up to 16 ordinary keypresses; additional keys are dropped while
 the queue is full, but Escape is still recognized. Non-keyboard redirected
 input is not polled; GET continues to read it as a byte stream.
@@ -58,3 +62,31 @@ land purchases must update acreage and grain, and planting retries must preserve
 stack depth. Blackjack's text source is tokenized and its score procedure is run
 with a one-player hand through the pause and return. These are focused gameplay
 checks rather than complete interactive playthroughs.
+
+## ZShell integration
+
+A separate headless kernel is unnecessary. The native emulator's `--console
+--debug` mode drives the same video/PS2 kernel used interactively. Build a ROM
+with ZShell and HostFS enabled (the existing `zshell/emu` configuration):
+
+```sh
+zde kernel zshell/emu
+zde cmake
+python3 tests/zshell_integration.py --build-dir build \
+  --rom /path/to/os_with_romdisk.img --kernel-map /path/to/os.map
+```
+
+The ROM and map must come from the same kernel build. Supply `--emulator` for
+another native-emulator executable, `--tf` for a TF image, and `--log` to retain
+the debugger transcript. The test creates private ROM, EEPROM, TF and HostFS
+copies; it does not write to the supplied images or emulator configuration.
+It exposes the newly built BASIC through HostFS and launches `h:/bbcbasic` from
+ZShell, so an older BASIC in ROM or on a TF card cannot be selected accidentally.
+The ROM still needs ZShell itself and its normal startup files.
+
+Assertions cover inherited raw/nonblocking stdin, the cooked/blocking mode
+change, idle blocking, read status/count and LF termination, numeric PRINT,
+INPUT, raw GET, numbered program entry/RUN, floating-point arithmetic during
+hardware interrupts, physical Escape from an infinite loop, SAVE, return to
+ZShell and filename auto-run after relaunch. These tests execute real kernel
+syscalls and the emulated PS/2 device; physical hardware remains unverified.

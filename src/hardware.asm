@@ -16,7 +16,7 @@
 ;    misrepresented as being the original software.
 ; 3. This notice may not be removed or altered from any source distribution.
 
-        INCLUDE "zos_sys.asm"
+        INCLUDE "zos_syscall.asm"
         INCLUDE "zos_video.asm"
 
 ; HARDWARE FUNCTIONS
@@ -40,6 +40,7 @@
         PUBLIC	PUTIME
         PUBLIC	GETIME
 
+        EXTERN ZOS_SYSCALL
         EXTERN	EXTERR
         EXTERN	TELL
         EXTERN	PBCDL
@@ -56,7 +57,7 @@ DEFC ESC	 = 	27
 CLRSCN:
         ld h, DEV_STDOUT
         ld c, CMD_CLEAR_SCREEN
-        IOCTL()
+        BBC_SYSCALL(7)
         ret
 
 ;PUTCSR	- Move cursor to specified position.
@@ -73,7 +74,7 @@ PUTCSR:
         ld d, a
         ld a, (TEXTY)
         ld e, a
-        IOCTL()
+        BBC_SYSCALL(7)
         pop bc
         ret
 
@@ -86,7 +87,7 @@ GETCSR:
         ld h, DEV_STDOUT
         ld c, CMD_GET_CURSOR_XY
         ld de, CURSOR_POS
-        IOCTL()
+        BBC_SYSCALL(7)
 
         ld de, (CURSOR_POS)
 
@@ -132,7 +133,7 @@ OUTCLR:
         ld h, DEV_STDOUT
         ld c, CMD_SET_COLORS
         ld de, (COLOR_FG)
-        IOCTL()
+        BBC_SYSCALL(7)
         JP	XEQ
 
 ; GCOL - Set graphics color

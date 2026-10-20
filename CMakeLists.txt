@@ -22,10 +22,10 @@ add_executable(bbcbasic
 # CMake does not scan z80asm INCLUDE directives for dependencies.
 set(zos_sdk_dir "$ENV{ZOS_PATH}/sdk/z88dk-z80asm")
 set_source_files_properties(src/hardware.asm PROPERTIES
-    OBJECT_DEPENDS "${zos_sdk_dir}/zos_sys.asm;${zos_sdk_dir}/zos_video.asm"
+    OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/zos_syscall.asm;${zos_sdk_dir}/zos_sys.asm;${zos_sdk_dir}/zos_video.asm"
 )
 set_source_files_properties(src/zos.asm PROPERTIES
-    OBJECT_DEPENDS "${zos_sdk_dir}/zos_sys.asm;${zos_sdk_dir}/zos_keyboard.asm"
+    OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/zos_syscall.asm;${zos_sdk_dir}/zos_sys.asm;${zos_sdk_dir}/zos_keyboard.asm"
 )
 
 target_link_options(bbcbasic PRIVATE -m)

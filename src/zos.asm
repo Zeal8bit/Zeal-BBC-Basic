@@ -1,6 +1,7 @@
-    INCLUDE "zos_sys.asm"
+    INCLUDE "zos_syscall.asm"
     INCLUDE "zos_keyboard.asm"
 
+        PUBLIC ZOS_SYSCALL
         PUBLIC	OSINIT
         PUBLIC	OSRDCH
         PUBLIC	OSWRCH
@@ -39,9 +40,9 @@
         EXTERN	USER
 
 
-        ; Interpreter arithmetic uses the alternate register bank. The OS
-        ; reserves that bank for interrupt handlers, so every enabled window
-        ; must save it, including blocking console reads.
+        ; BASIC uses the alternate bank for arithmetic. Its private IM2
+        ; vectors preserve that bank before delegating to the kernel handlers.
+        ; Short DI sections protect restoration; device reads remain enabled.
         MACRO SAVE_ALTERNATES _
                 ex af, af'
                 push af
@@ -62,6 +63,7 @@
                 ex af, af'
                 pop af
                 ex af, af'
+                ei
         ENDM
 
 ;OSINIT - Initialise RAM mapping etc.
@@ -73,7 +75,12 @@
 ;  Destroys: A,B,C,D,E,H,L,F
 ;
 OSINIT:
-        di       ; disable interrupts
+        di
+        push bc
+        push de
+        call IRQ_INIT
+        pop de
+        pop bc
         xor a
         ld (ACCS), a
         ld a, b
@@ -102,8 +109,80 @@ SKIPLOAD:
         ldir                    ; initialize this interpreter's ownership table
         call INPUT_RAW
         pop af
-        ld de, 0xF800
+        ld de, IRQ_TABLE
         ld hl, USER ; start of user memory
+        ret
+
+; Zeal's IM2 vectors 0 and 2 dispatch the default and PIO handlers. Copy the
+; kernel table into private RAM, wrapping those handlers without modifying the
+; kernel's ROM or RAM. Reserve this page above BASIC's stack/heap limit.
+DEFC IRQ_TABLE = 0xF700
+ORIGINAL_I: DEFB 0
+IRQ_READY: DEFB 0
+IRQ_INIT:
+        ld a, i
+        ld (ORIGINAL_I), a
+        ld h, a
+        ld l, 0
+        ld de, IRQ_TABLE
+        ld bc, 257
+        ei                      ; no live alternate values during cold start
+        ldir
+        ld hl, (IRQ_TABLE)
+        ld (IRQ_DEFAULT_CALL + 1), hl
+        ld hl, IRQ_DEFAULT
+        ld (IRQ_TABLE), hl
+        ld hl, (IRQ_TABLE + 2)
+        ld (IRQ_PIO_CALL + 1), hl
+        ld hl, IRQ_PIO
+        ld (IRQ_TABLE + 2), hl
+        di
+        ld a, IRQ_TABLE >> 8
+        ld i, a
+        ld a, 1
+        ld (IRQ_READY), a
+        ei
+        ret
+IRQ_DEFAULT:
+        SAVE_ALTERNATES()
+IRQ_DEFAULT_CALL:
+        call 0                  ; filled from the original kernel vector
+        jr IRQ_RETURN
+IRQ_PIO:
+        SAVE_ALTERNATES()
+IRQ_PIO_CALL:
+        call 0
+IRQ_RETURN:
+        RESTORE_ALTERNATES()
+        reti
+
+; Kernel syscalls temporarily remap the page containing the private table.
+; Switch back to the kernel vectors with the alternate bank on our stack.
+; Restore the private table only after the kernel restores the user's pages.
+ZOS_SYSCALL:
+        push af
+        ld a, (IRQ_READY)
+        or a
+        jr z, SYSCALL_UNWRAPPED
+        pop af
+        SAVE_ALTERNATES()
+        push af
+        di
+        ld a, (ORIGINAL_I)
+        ld i, a
+        pop af
+        ei
+        rst 0x08
+        push af
+        di
+        ld a, IRQ_TABLE >> 8
+        ld i, a
+        pop af
+        RESTORE_ALTERNATES()
+        ret
+SYSCALL_UNWRAPPED:
+        pop af
+        rst 0x08
         ret
 
 ;PTEXT - Print text
@@ -118,7 +197,8 @@ CPTEXT:
         ex de, hl
         ld c, b
         ld b, 0
-        S_WRITE1(DEV_STDOUT)
+        ld h, DEV_STDOUT
+        BBC_SYSCALL(1)
         pop bc
         pop de
         ret
@@ -148,10 +228,11 @@ KEY_RETURN:
         pop bc
         ret
 KEY_STREAM:
-        SAVE_ALTERNATES()
         ei
-        S_READ3(DEV_STDIN, KEY_EVENTS, 1)
-        RESTORE_ALTERNATES()
+        ld h, DEV_STDIN
+        ld de, KEY_EVENTS
+        ld bc, 1
+        BBC_SYSCALL(0)
         or a
         jp nz, SHOW_ERROR
         ld a, c
@@ -176,7 +257,7 @@ INPUT_RAW:
         ld h, DEV_STDIN
         ld c, KB_CMD_SET_MODE
         ld de, KB_READ_NON_BLOCK | KB_MODE_RAW
-        IOCTL()
+        BBC_SYSCALL(7)
         or a
         ld a, 0
         jr nz, INPUT_RAW_DONE    ; redirected/non-keyboard stdin cannot be polled
@@ -197,7 +278,7 @@ INPUT_COOKED:
         ld h, DEV_STDIN
         ld c, KB_CMD_SET_MODE
         ld de, KB_READ_BLOCK | KB_MODE_COOKED
-        IOCTL()
+        BBC_SYSCALL(7)
         pop hl
         pop de
         pop bc
@@ -213,7 +294,10 @@ OSWRCH:
         push bc
         push de
         push hl
-        S_WRITE3(DEV_STDOUT, BUFFER, 1)
+        ld h, DEV_STDOUT
+        ld de, BUFFER
+        ld bc, 1
+        BBC_SYSCALL(1)
         pop hl
         pop de
         pop bc
@@ -223,7 +307,6 @@ OSWRCH:
 ;OSLINE - Read a bounded LF-terminated line into a 256-byte buffer.
 ; HL addresses the buffer (L=0). A=0 on success; errors are trappable.
 OSLINE:
-        SAVE_ALTERNATES()
         ld (hl), 10             ; even a failed/empty read leaves a safe buffer
         push hl
         call INPUT_COOKED
@@ -241,8 +324,8 @@ LINE_COOKED:
         ex de, hl
         ld bc, 255              ; room for 254 characters plus the keyboard's LF
         ei
-        S_READ1(DEV_STDIN)
-        di
+        ld h, DEV_STDIN
+        BBC_SYSCALL(0)
         pop hl
         or a
         jr nz, LINE_ERROR
@@ -275,7 +358,6 @@ LINE_DONE:
         push af
         call INPUT_RAW
         pop af
-        RESTORE_ALTERNATES()
         or a
         jp nz, SHOW_ERROR
         ret
@@ -290,8 +372,10 @@ LINE_STREAM_READ:
         push hl
         push bc
         ei
-        S_READ3(DEV_STDIN, BUFFER, 1)
-        di
+        ld h, DEV_STDIN
+        ld de, BUFFER
+        ld bc, 1
+        BBC_SYSCALL(0)
         ld d, a
         ld e, c
         pop bc
@@ -363,7 +447,7 @@ OSOPEN_ERROR:
 ; is owned until CLOSE succeeds. Zeal descriptors are shared with the caller;
 ; never infer ownership merely from a descriptor being open in the OS.
 FILE_OPEN:
-        OPEN()
+        BBC_SYSCALL(2)
         or a
         ret m
         push af
@@ -382,7 +466,7 @@ FILE_OPEN:
 
 FILE_CLOSE:
         push hl
-        CLOSE()
+        BBC_SYSCALL(3)
         pop hl
         or a
         ret nz                  ; retain ownership so failed closes can be retried
@@ -412,13 +496,13 @@ OSSTAT:
         ld bc, 0
         ld de, 0
         ld a, SEEK_CUR
-        SEEK()                  ; inspect the position without consuming a byte
+        BBC_SYSCALL(6)          ; inspect the position without consuming a byte
         or a
         jp nz, SHOW_ERROR
         push bc
         push de
         ld de, BUFFER
-        DSTAT()
+        BBC_SYSCALL(4)
         or a
         jp nz, SHOW_ERROR
         pop de                  ; BCDE = current position
@@ -460,7 +544,7 @@ OSBGET:
         ld h, e
         ld de, BUFFER
         ld bc, 1
-        READ()
+        BBC_SYSCALL(0)
         or a
         jp nz, SHOW_ERROR
         ; If we read 0 byte, it's the end of the file, it's not exactly how it should
@@ -492,7 +576,7 @@ OSBPUT:
         ld bc, 1
         ; Byte to write in BUFFER
         ld (de), a
-        WRITE()
+        BBC_SYSCALL(1)
         or a
         jp nz, SHOW_ERROR
         dec bc
@@ -530,7 +614,7 @@ OSLOAD:
         push de
         push bc
         ld de, BUFFER
-        DSTAT()
+        BBC_SYSCALL(4)
         or a
         jr nz, LOAD_STAT_ERROR
         ld hl, (BUFFER + 3)
@@ -589,7 +673,7 @@ FILE_TRANSFER:
         or c
         ret z
         call FILE_CHUNK
-        SYSCALL
+        call ZOS_SYSCALL
         or a
         jp nz, CLOSE_ERROR
         ld a, b
@@ -755,7 +839,7 @@ CLOSE_FAILURE: DEFB 0
 GETEXT:
         ld h, e
         ld de, BUFFER
-        DSTAT()
+        BBC_SYSCALL(4)
         ; Report errors before interpreting the stat buffer.
         or a
         jr nz, GETEXT_ERROR
@@ -779,7 +863,7 @@ GETPTR:
         ld d, b
         ld e, c
         ld a, SEEK_CUR
-        SEEK()
+        BBC_SYSCALL(6)
         or a
         jr nz, GETPTR_ERROR
         ld h, b
@@ -803,7 +887,7 @@ PUTPTR:
         ; Set the opened dev
         ld h, a
         ld a, SEEK_SET
-        SEEK()
+        BBC_SYSCALL(6)
         or a
         jp nz, SHOW_ERROR
         ret
@@ -822,9 +906,12 @@ BYE:
         ld e, 0
         call OSSHUT
         call INPUT_COOKED
-        ld h, 0 ; Return value
+        di
+        ld a, (ORIGINAL_I)
+        ld i, a                 ; restore the parent's interrupt table
+        ld h, 0                 ; return value
         ei
-        EXIT()
+        BBC_SYSCALL(15)
 
 RESET:
         xor a
@@ -873,21 +960,21 @@ TRAP:
         ld (TRAP_COUNT), a
         jr LTRAP
 
-; Keep the interpreter interrupt-disabled except inside this guarded window.
-; Save AF', BC', DE', HL' before any interrupt or keyboard syscall can run.
+; Preserve arithmetic registers across polling as well as asynchronous IRQs.
 ; Destroys main registers only; IX/IY remain owned by the interpreter.
 POLL_INPUT:
-        SAVE_ALTERNATES()
+        ; IRQ and syscall boundaries preserve the alternate bank.
         ei
         nop
-        di
         ld a, (RAW_INPUT)
         or a
         jr z, POLL_DONE
         ; Two bytes accommodate a complete release pair without consuming
         ; unrelated events that the decoder cannot retain.
-        S_READ3(DEV_STDIN, KEY_EVENTS, 2)
-        di
+        ld h, DEV_STDIN
+        ld de, KEY_EVENTS
+        ld bc, 2
+        BBC_SYSCALL(0)
         or a
         jr nz, POLL_DONE
         ld a, c
@@ -919,7 +1006,6 @@ POLL_TRANSLATE:
 POLL_NEXT:
         djnz POLL_EVENT
 POLL_DONE:
-        RESTORE_ALTERNATES()
         ret
 
 ; Raw keyboard events -> US-ASCII characters. Modifier-only and unsupported
