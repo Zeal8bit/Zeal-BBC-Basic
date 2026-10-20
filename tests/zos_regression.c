@@ -25,6 +25,8 @@ static uint8_t keys[128];
 static unsigned key_size, key_pos, keyboard_mode;
 static int inject_interrupt, interrupt_seen, escape_after_reads, input_reads;
 static int partial_release;
+static int file_exists;
+static void invoke(const char *entry);
 
 static uint8_t read_ram(device_t *dev, uint32_t address) { (void)dev; return memory[address & 65535]; }
 static void write_ram(device_t *dev, uint32_t address, uint8_t value) { (void)dev; memory[address & 65535] = value; }
@@ -65,17 +67,20 @@ static void reset(const char *entry) {
     key_size = key_pos = keyboard_mode = 0;
     inject_interrupt = interrupt_seen = escape_after_reads = input_reads = 0;
     partial_release = 0;
+    file_exists = 1; last_flags = 2;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0x7c00, "test.bbc");
     set_hl(0x7c00); set_de(0x8000); set_bc(16);
 }
 static void syscall(void) {
     unsigned call = cpu.l, address = cpu.d << 8 | cpu.e, count = cpu.b << 8 | cpu.c;
+    unsigned whence = cpu.a;
     cpu.a = 0;
     if ((int)call == fail_call) { cpu.a = call == 2 ? (uint8_t)-failure : failure; }
     else switch (call) {
     case 2:
-        opened++; last_flags = cpu.h;
+        if (!file_exists && !(cpu.h & 16)) { cpu.a = (uint8_t)-4; break; }
+        opened++; last_flags = cpu.h; file_exists = 1; file_pos = 0;
         for (unsigned i = 0; i < sizeof(opened_name) - 1; ++i) {
             opened_name[i] = memory[(uint16_t)(count + i)];
             if (!opened_name[i]) break;
@@ -100,6 +105,9 @@ static void syscall(void) {
             set_bc(count); break;
         }
         if (call == 1 && cpu.h == 0) break;
+        if ((call == 0 && (last_flags & 3) == 1) || (call == 1 && (last_flags & 3) == 0)) {
+            cpu.a = 19; break;
+        }
         transfers++;
         if (transfers == fail_transfer) { cpu.a = failure; break; }
         if (count > 0x4000 || (address & 0x3fff) + count > 0x4000) {
@@ -111,12 +119,19 @@ static void syscall(void) {
             if (count > file_size - file_pos) count = file_size - file_pos;
             memcpy(memory + address, file + file_pos, count);
         } else {
+            if (last_flags & 8) file_pos = file_size;
             assert(file_pos + count <= sizeof(file));
             memcpy(file + file_pos, memory + address, count);
             if (file_pos + count > file_size) file_size = file_pos + count;
         }
         file_pos += count; set_bc(count); break;
-    case 6: set_bc(0); set_de(file_pos); break;
+    case 6: {
+        uint32_t offset = (uint32_t)cpu.b << 24 | (uint32_t)cpu.c << 16 | address;
+        uint32_t base = whence == 1 ? file_pos : whence == 2 ? file_size : 0;
+        uint32_t next = base + offset;
+        file_pos = next > file_size ? file_size : next;
+        set_bc(file_pos >> 16); set_de(file_pos & 65535); break;
+    }
     case 7: keyboard_mode = cpu.e; break;
     default: fprintf(stderr, "Unexpected syscall: %u\n", call); exit(1);
     }
@@ -192,6 +207,24 @@ static void test_saves(void) {
     CHECK(file_size == 10000); CHECK(!memcmp(file, memory + 0xbffd, 10000));
     reset("OSSAVE"); set_bc(17000); fail_transfer = 2; close_failure = 6; run();
     CHECK(basic_error == (128 | 19)); CHECK(closed == 1);
+}
+static void open_basic(void) {
+    strcpy((char *)memory + 0x7d00, "\"test.bbc\"\n"); cpu.iy = 0x7d00;
+    run();
+}
+static void test_openout(void) {
+    reset("OPENOT"); open_basic();
+    CHECK(!basic_error); CHECK(cpu.l_ == 2); CHECK(last_flags == 21);
+    CHECK(file_size == 0); CHECK(file_pos == 0);
+    cpu.e = 2; cpu.a = 'x'; invoke("OSBPUT");
+    CHECK(!basic_error); CHECK(file_size == 1 && file[0] == 'x');
+    set_de(0); set_hl(0); cpu.a = 2; invoke("PUTPTR");
+    cpu.e = 2; cpu.a = 'y'; invoke("OSBPUT");
+    CHECK(!basic_error); CHECK(file_size == 1 && file[0] == 'y');
+    reset("OPENOT"); file_exists = 0; open_basic();
+    CHECK(cpu.l_ == 2); CHECK(file_exists); CHECK(file_size == 0);
+    reset("OPENOT"); fail_call = 2; open_basic();
+    CHECK(!basic_error); CHECK(cpu.l_ == 0);
 }
 static void test_chain_names(void) {
     const char *entries[] = {"CHAIN", "RUN"};
@@ -311,6 +344,7 @@ int main(int argc, char **argv) {
     test_errors();
     test_loads();
     test_saves();
+    test_openout();
     test_chain_names();
     test_bundled_loads();
     test_escape();

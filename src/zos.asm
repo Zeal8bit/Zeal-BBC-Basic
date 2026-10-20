@@ -237,7 +237,7 @@ OSOPEN:
         ; Set the flags
         ld h, O_RDONLY
         jr c, OSOPEN_READ
-        ld h, O_WRONLY | O_CREAT | O_APPEND
+        ld h, O_WRONLY | O_CREAT | O_TRUNC
 OSOPEN_READ:
         OPEN()
         ; Check for error, if positive, return
