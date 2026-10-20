@@ -36,6 +36,31 @@
         EXTERN	USER
 
 
+        ; Interpreter arithmetic uses the alternate register bank. The OS
+        ; reserves that bank for interrupt handlers, so every enabled window
+        ; must save it, including blocking console reads.
+        MACRO SAVE_ALTERNATES _
+                ex af, af'
+                push af
+                ex af, af'
+                exx
+                push bc
+                push de
+                push hl
+                exx
+        ENDM
+        MACRO RESTORE_ALTERNATES _
+                di
+                exx
+                pop hl
+                pop de
+                pop bc
+                exx
+                ex af, af'
+                pop af
+                ex af, af'
+        ENDM
+
 ;OSINIT - Initialise RAM mapping etc.
 ;If BASIC is entered by BBCBASIC FILENAME then file
 ;FILENAME.BBC is automatically CHAINed.
@@ -57,6 +82,9 @@ OSINIT:
         ; Reset Z flag
         or 1
 SKIPLOAD:
+        push af                 ; preserve the auto-run decision
+        call INPUT_RAW
+        pop af
         ld de, 0xF800
         ld hl, USER ; start of user memory
         ret
@@ -83,49 +111,78 @@ CPTEXT:
 ;  Outputs: A = character
 ; Destroys: A,F
 ;
-KEYGET:
 OSRDCH:
         push bc
         push de
         push hl
+WAITFORKEY:
+        ld a, (RAW_INPUT)
+        or a
+        jr z, KEY_STREAM
+        call POLL_INPUT
+        ld a, (ESC_PENDING)
+        or a
+        jr nz, KEY_ESCAPE
+        call KEY_DEQUEUE
+        jr nc, WAITFORKEY
+KEY_RETURN:
+        pop hl
+        pop de
+        pop bc
+        ret
+KEY_STREAM:
+        SAVE_ALTERNATES()
+        ei
+        S_READ3(DEV_STDIN, KEY_EVENTS, 1)
+        RESTORE_ALTERNATES()
+        or a
+        jp nz, SHOW_ERROR
+        ld a, c
+        or a
+        jr nz, KEY_STREAM_BYTE
+        ld a, ERR_NO_MORE_ENTRIES
+        jp SHOW_ERROR
+KEY_STREAM_BYTE:
+        ld a, (KEY_EVENTS)
+        jr KEY_RETURN
+KEY_ESCAPE:
+        pop hl
+        pop de
+        pop bc
+        jp ESCAPE
 
-        ; raw mode
+; Mode changes preserve the interpreter's main register pairs.
+INPUT_RAW:
+        push bc
+        push de
+        push hl
         ld h, DEV_STDIN
         ld c, KB_CMD_SET_MODE
         ld de, KB_READ_NON_BLOCK | KB_MODE_RAW
         IOCTL()
-
-        ei
-        ; loop until a key is pressed
-WAITFORKEY:
-        S_READ3(DEV_STDIN, BUFFER, 3)
         or a
-        jr nz, KEYERROR
-        ; A is zero for sure, OR it with C to check if C is 0
-        or c
-        jr z, WAITFORKEY ; if no key
-        ld a, (de) ; get the code from BUFFER[0]
-        cp KB_RELEASED
-        jr z, WAITFORKEY
-        jp KEYREAD
-KEYERROR:
-        ; an error has occurred, handle it
-        ; DE still contains the buffer address
-        ld (de), a
-KEYREAD:
-        di
-
-        ; go back to cooked mode
+        ld a, 0
+        jr nz, INPUT_RAW_DONE    ; redirected/non-keyboard stdin cannot be polled
+        inc a
+INPUT_RAW_DONE:
+        ld (RAW_INPUT), a
+        pop hl
+        pop de
+        pop bc
+        ret
+INPUT_COOKED:
+        push bc
+        push de
+        push hl
+        xor a
+        ld (RAW_INPUT), a
         ld h, DEV_STDIN
         ld c, KB_CMD_SET_MODE
         ld de, KB_READ_BLOCK | KB_MODE_COOKED
         IOCTL()
-
         pop hl
         pop de
         pop bc
-
-        ld a, (BUFFER) ; get the code from BUFFER[0]
         ret
 
 ;OSWRCH - Write a character to console output.
@@ -153,11 +210,15 @@ OSWRCH:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSLINE:
+        SAVE_ALTERNATES()
+        call INPUT_COOKED
         ex de, hl
         ld bc, 254
         ei
         S_READ1(DEV_STDIN)
         di
+        call INPUT_RAW
+        RESTORE_ALTERNATES()
         xor a
         ret
 
@@ -509,6 +570,7 @@ PROMPT:
 ;BYE - Stop interrupts and return to CP/M.
 ;
 BYE:
+        call INPUT_COOKED
         ld h, 0 ; Return value
         ei
         EXIT()
@@ -516,29 +578,147 @@ BYE:
 RESET:
         xor a
         ld (OPTVAL), a
+        ld (ESC_PENDING), a
+        ld (KEY_COUNT), a
+        ld (KEY_READ), a
+        ld (KEY_WRITE), a
+        ld a, 20
+        ld (TRAP_COUNT), a
         ret
 
 OPTVAL: DEFS 1
+RAW_INPUT: DEFB 0
+ESC_PENDING: DEFB 0
+TRAP_COUNT: DEFB 20
+KEY_COUNT: DEFB 0
+KEY_READ: DEFB 0
+KEY_WRITE: DEFB 0
+KEY_QUEUE: DEFS 16
+KEY_EVENTS: DEFS 2
 
-;LTRAP - Test ESCAPE flag and abort if set.
-; Destroys: A,F
-;
+;LTRAP - Poll and abort on Escape. Preserve all register pairs, including
+; alternate registers: Zeal interrupt handlers are allowed to use them.
 LTRAP:
-        xor a
+        push bc
+        push de
+        push hl
+        call POLL_INPUT
+        ld a, (ESC_PENDING)
+        or a
+        pop hl
+        pop de
+        pop bc
+        jp nz, ESCAPE
         ret
 
-;TRAP - Test ESCAPE flag and abort if set;
-;       every 20th call, test for keypress.
-; Destroys: A,H,L,F
-;
+;TRAP - Service keyboard/interrupts every 20 statements or loop iterations.
 TRAP:
+        ld a, (TRAP_COUNT)
+        dec a
+        ld (TRAP_COUNT), a
+        ret nz
+        ld a, 20
+        ld (TRAP_COUNT), a
+        jr LTRAP
+
+; Keep the interpreter interrupt-disabled except inside this guarded window.
+; Save AF', BC', DE', HL' before any interrupt or keyboard syscall can run.
+; Destroys main registers only; IX/IY remain owned by the interpreter.
+POLL_INPUT:
+        SAVE_ALTERNATES()
+        ei
+        nop
+        di
+        ld a, (RAW_INPUT)
+        or a
+        jr z, POLL_DONE
+        ; Two bytes accommodate a complete release pair without consuming
+        ; unrelated events that the decoder cannot retain.
+        S_READ3(DEV_STDIN, KEY_EVENTS, 2)
+        di
+        or a
+        jr nz, POLL_DONE
+        ld a, c
+        or a
+        jr z, POLL_DONE
+        ld b, c
+        ld hl, KEY_EVENTS
+POLL_EVENT:
+        ld a, (hl)
+        inc hl
+        cp KB_RELEASED
+        jr nz, POLL_PRESS
+        ; The ABI promises a pair. Older drivers can return a trailing marker;
+        ; ignore it without reading beyond the buffer or wrapping the counter.
+        dec b
+        jr z, POLL_DONE
+        inc hl
+        jr POLL_NEXT
+POLL_PRESS:
+        cp KB_ESC
+        jr z, POLL_ESCAPE
+        cp 27                   ; ASCII Escape on compatible input drivers
+        jr z, POLL_ESCAPE
+        push bc
+        push hl
+        call KEY_ENQUEUE
+        pop hl
+        pop bc
+        jr POLL_NEXT
+POLL_ESCAPE:
+        ld a, 1
+        ld (ESC_PENDING), a
+POLL_NEXT:
+        djnz POLL_EVENT
+POLL_DONE:
+        RESTORE_ALTERNATES()
+        ret
+
+; Retain ordinary keypresses for GET while polling for Escape. Like the
+; hardware FIFO, this bounded queue drops new keys when full, but polling
+; continues so Escape always remains reachable.
+KEY_ENQUEUE:
+        ld c, a
+        ld a, (KEY_COUNT)
+        cp 16
+        ret nc
+        inc a
+        ld (KEY_COUNT), a
+        ld a, (KEY_WRITE)
+        ld e, a
+        ld d, 0
+        ld hl, KEY_QUEUE
+        add hl, de
+        ld (hl), c
+        inc a
+        and 15
+        ld (KEY_WRITE), a
+        ret
+
+; Carry set and A = next key, carry clear if none.
+KEY_DEQUEUE:
+        ld a, (KEY_COUNT)
+        or a
+        ret z
+        dec a
+        ld (KEY_COUNT), a
+        ld a, (KEY_READ)
+        ld e, a
+        ld d, 0
+        ld hl, KEY_QUEUE
+        add hl, de
+        inc a
+        and 15
+        ld (KEY_READ), a
+        ld a, (hl)
+        scf
         ret
 
 ;
 ;OSCLI - Process an "operating system" command
 ;
 OSCLI:
-        jr BYE
+        jp BYE
         ret
 
 ;

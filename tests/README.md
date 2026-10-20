@@ -16,6 +16,16 @@ The harness supplies flat RAM and deterministic Zeal syscall responses, includin
 short transfers, OS failures and virtual-page constraints. It does not replace
 end-to-end testing on Zeal OS or physical hardware.
 
+Keyboard checks inject an interrupt handler that destroys the alternate CPU
+register bank. They verify that polling and blocking input preserve BASIC's
+registers, Escape releases are ignored, ordinary keys remain available to GET,
+and an infinite GOTO loop can return to the prompt with error 17 (Escape).
+Interrupts remain disabled during interpreter arithmetic and are serviced in
+guarded polling windows every 20 execution checks, and during blocking input.
+Polling retains up to 16 ordinary keypresses; additional keys are dropped while
+the queue is full, but Escape is still recognized. Non-keyboard redirected
+input is not polled; GET continues to read it as a byte stream.
+
 OS failures reported by this port use BASIC `ERR = 128 + Zeal OS error code`
 and the message `Zeal OS error`. `OPENIN`/`OPENOUT`/`OPENUP` retain their BASIC
 contract of returning channel zero when opening fails.

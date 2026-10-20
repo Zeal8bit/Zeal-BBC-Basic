@@ -20,6 +20,11 @@ static unsigned last_flags;
 static char opened_name[256];
 static unsigned checks;
 static unsigned stop_pc;
+static int follow_basic_error;
+static uint8_t keys[128];
+static unsigned key_size, key_pos, keyboard_mode;
+static int inject_interrupt, interrupt_seen, escape_after_reads, input_reads;
+static int partial_release;
 
 static uint8_t read_ram(device_t *dev, uint32_t address) { (void)dev; return memory[address & 65535]; }
 static void write_ram(device_t *dev, uint32_t address, uint8_t value) { (void)dev; memory[address & 65535] = value; }
@@ -56,6 +61,10 @@ static void reset(const char *entry) {
     fail_transfer = premature_eof = 0;
     file_pos = 0; file_size = 16; opened_name[0] = 0;
     stop_pc = 0;
+    follow_basic_error = 0;
+    key_size = key_pos = keyboard_mode = 0;
+    inject_interrupt = interrupt_seen = escape_after_reads = input_reads = 0;
+    partial_release = 0;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0x7c00, "test.bbc");
     set_hl(0x7c00); set_de(0x8000); set_bc(16);
@@ -79,6 +88,18 @@ static void syscall(void) {
         for (int i = 0; i < 4; ++i) memory[address + 1 + i] = file_size >> (8 * i);
         break;
     case 0: case 1:
+        if (call == 0 && cpu.h == 1) {
+            input_reads++;
+            if (escape_after_reads && input_reads == escape_after_reads) {
+                keys[key_size++] = 0xf0;
+            }
+            if (count > key_size - key_pos) count = key_size - key_pos;
+            /* A raw read may never end with a release marker. */
+            if (!partial_release && count && keys[key_pos + count - 1] == 0xfe) count--;
+            memcpy(memory + address, keys + key_pos, count); key_pos += count;
+            set_bc(count); break;
+        }
+        if (call == 1 && cpu.h == 0) break;
         transfers++;
         if (transfers == fail_transfer) { cpu.a = failure; break; }
         if (count > 0x4000 || (address & 0x3fff) + count > 0x4000) {
@@ -96,6 +117,7 @@ static void syscall(void) {
         }
         file_pos += count; set_bc(count); break;
     case 6: set_bc(0); set_de(file_pos); break;
+    case 7: keyboard_mode = cpu.e; break;
     default: fprintf(stderr, "Unexpected syscall: %u\n", call); exit(1);
     }
     /* Zeal returns status in A. Deliberately do not promise meaningful flags. */
@@ -106,7 +128,11 @@ static void run(void) {
     unsigned error_entry = symbol("EXTERR");
     for (unsigned step = 0; step < 2000000; ++step) {
         if (cpu.pc == 0x3000 || (stop_pc && cpu.pc == stop_pc)) return;
-        if (cpu.pc == error_entry) { basic_error = cpu.a; return; }
+        if (cpu.pc == error_entry && !follow_basic_error) { basic_error = cpu.a; return; }
+        if (inject_interrupt && cpu.iff1) {
+            inject_interrupt = 0; z80_gen_int(&cpu, 0xff);
+        }
+        if (cpu.pc == 0x2000) interrupt_seen++;
         if (cpu.pc == 8) syscall(); else z80_step(&cpu);
     }
     fprintf(stderr, "Instruction limit at %04x\n", cpu.pc); exit(1);
@@ -127,7 +153,7 @@ static void test_errors(void) {
     CHECK(basic_error == (128 | 19)); CHECK(closed == 1);
     reset("OSSAVE"); close_failure = 6; run(); CHECK(basic_error == (128 | 6));
     reset("OSSAVE"); short_limit = 0; run(); CHECK(basic_error == (128 | 1)); CHECK(closed == 1);
-    reset("OSBPUT"); short_limit = 0; run(); CHECK(basic_error == (128 | 1));
+    reset("OSBPUT"); cpu.e = 2; short_limit = 0; run(); CHECK(basic_error == (128 | 1));
 }
 static void test_loads(void) {
     const unsigned lengths[] = {0, 1, 8191, 8192, 8193, 13914, 16384, 16385, 28000};
@@ -183,6 +209,100 @@ static void test_chain_names(void) {
         CHECK(cpu.pc == stop_pc);
     }
 }
+static void test_bundled_loads(void) {
+    const char *paths[] = {"examples/hello.bbc", "examples/crystal.bbc", "examples/neptune2.bbc"};
+    for (unsigned i = 0; i < 3; ++i) {
+        reset("CHAIN"); FILE *fp = fopen(paths[i], "rb"); assert(fp);
+        file_size = fread(file, 1, sizeof(file), fp); fclose(fp);
+        unsigned page = symbol("PAGE"), himem = symbol("HIMEM");
+        memory[page] = 0; memory[page + 1] = 0x80;
+        memory[himem] = 0; memory[himem + 1] = 0xf7;
+        snprintf((char *)memory + 0x7d00, 128, "\"%s\"\n", paths[i]); cpu.iy = 0x7d00;
+        stop_pc = symbol("RUN0"); run();
+        CHECK(!basic_error); CHECK(cpu.pc == stop_pc);
+        CHECK(!strcmp(opened_name, paths[i])); CHECK(file_pos == file_size);
+        CHECK(!memcmp(memory + 0x8000, file, file_size));
+    }
+}
+static void prepare_keyboard(void) {
+    memory[symbol("RAW_INPUT")] = 1;
+    cpu.a_ = 0x12; cpu.f_ = 0x34; cpu.b_ = 0x56; cpu.c_ = 0x78;
+    cpu.d_ = 0x9a; cpu.e_ = 0xbc; cpu.h_ = 0xde; cpu.l_ = 0xf0;
+    /* An allowed OS ISR deliberately destroys the entire alternate bank. */
+    const uint8_t isr[] = {0xd9, 0x01, 0xaa, 0xbb, 0x11, 0xcc, 0xdd,
+                          0x21, 0xee, 0xff, 0xd9, 0x08, 0x3e, 0x55,
+                          0xb7, 0x08, 0xfb, 0xed, 0x4d};
+    memcpy(memory + 0x2000, isr, sizeof(isr));
+    memory[0x38] = 0xc3; memory[0x39] = 0; memory[0x3a] = 0x20;
+    cpu.interrupt_mode = 1; inject_interrupt = 1;
+}
+static void check_alternates(void) {
+    CHECK(interrupt_seen == 1); CHECK(!cpu.iff1);
+    CHECK(cpu.a_ == 0x12 && cpu.f_ == 0x34);
+    CHECK(cpu.b_ == 0x56 && cpu.c_ == 0x78);
+    CHECK(cpu.d_ == 0x9a && cpu.e_ == 0xbc);
+    CHECK(cpu.h_ == 0xde && cpu.l_ == 0xf0);
+}
+static void invoke(const char *entry) {
+    cpu.pc = symbol(entry); cpu.sp = 0xf700;
+    memory[cpu.sp] = 0; memory[cpu.sp + 1] = 0x30;
+    run();
+}
+static void test_escape(void) {
+    reset("LTRAP"); prepare_keyboard(); run();
+    CHECK(!basic_error); check_alternates();
+    reset("LTRAP"); prepare_keyboard(); keys[0] = 0xf0; key_size = 1;
+    stop_pc = symbol("ESCAPE"); run();
+    CHECK(cpu.pc == stop_pc); check_alternates();
+    reset("LTRAP"); prepare_keyboard(); keys[0] = 0xfe; keys[1] = 0xf0; key_size = 2;
+    stop_pc = symbol("ESCAPE"); run();
+    CHECK(cpu.pc == 0x3000); CHECK(!memory[symbol("ESC_PENDING")]);
+    reset("LTRAP"); prepare_keyboard(); partial_release = 1;
+    keys[0] = 'a'; keys[1] = 0xfe; key_size = 2; run();
+    CHECK(cpu.pc == 0x3000); CHECK(memory[symbol("KEY_COUNT")] == 1);
+    keys[key_size++] = 0xf0; stop_pc = symbol("ESCAPE"); invoke("LTRAP");
+    CHECK(cpu.pc == stop_pc);
+    reset("TRAP"); prepare_keyboard(); keys[0] = 0xf0; key_size = 1;
+    stop_pc = symbol("ESCAPE");
+    for (int i = 0; i < 19; ++i) { invoke("TRAP"); CHECK(cpu.pc == 0x3000); }
+    CHECK(input_reads == 0); invoke("TRAP"); CHECK(cpu.pc == stop_pc);
+    reset("LTRAP"); prepare_keyboard(); keys[0] = 'a'; keys[1] = 'b'; keys[2] = 0xf0; key_size = 3;
+    stop_pc = symbol("ESCAPE"); run(); CHECK(cpu.pc == 0x3000);
+    invoke("LTRAP"); CHECK(cpu.pc == stop_pc);
+    reset("LTRAP"); prepare_keyboard(); keys[0] = 'a'; keys[1] = 'b'; key_size = 2; run();
+    invoke("OSRDCH"); CHECK(cpu.a == 'a'); invoke("OSRDCH"); CHECK(cpu.a == 'b');
+    reset("OSRDCH"); prepare_keyboard(); keys[0] = 0xf0; key_size = 1;
+    stop_pc = symbol("ESCAPE"); run(); CHECK(cpu.pc == stop_pc); check_alternates();
+    reset("LTRAP"); prepare_keyboard();
+    memset(keys, 'x', 32); keys[32] = 0xf0; key_size = 33;
+    stop_pc = symbol("ESCAPE");
+    for (int i = 0; i < 17; ++i) invoke("LTRAP");
+    CHECK(cpu.pc == stop_pc); CHECK(memory[symbol("KEY_COUNT")] == 16);
+    invoke("RESET"); CHECK(!memory[symbol("ESC_PENDING")]); CHECK(!memory[symbol("KEY_COUNT")]);
+    reset("OSLINE"); prepare_keyboard(); keys[0] = '\n'; key_size = 1; run();
+    CHECK(keyboard_mode == 4); check_alternates();
+    /* Real BASIC GOTO loop must reach Escape without calling GET/INPUT. */
+    reset("RUN0"); prepare_keyboard();
+    unsigned page = symbol("PAGE"), himem = symbol("HIMEM");
+    memory[page] = 0; memory[page + 1] = 0x80;
+    memory[himem] = 0; memory[himem + 1] = 0xf7;
+    const uint8_t loop[] = {9, 10, 0, 0xe5, 0x8d, 0x54, 0x4a, 0x40, 10, 0, 0xff, 0xff};
+    memcpy(memory + 0x8000, loop, sizeof(loop));
+    unsigned top = symbol("TOP"); memory[top] = 12; memory[top + 1] = 0x80;
+    escape_after_reads = 3; stop_pc = symbol("ESCAPE"); run();
+    CHECK(cpu.pc == stop_pc); CHECK(input_reads == 3);
+    /* Continue the real error path back to the prompt, rather than intercept it. */
+    stop_pc = symbol("CLOOP"); follow_basic_error = 1; run();
+    CHECK(cpu.pc == stop_pc); CHECK(memory[symbol("ERR")] == 17);
+    CHECK(!memory[symbol("ESC_PENDING")]); CHECK(!memory[symbol("KEY_COUNT")]);
+    reset("INPUT_RAW"); fail_call = 7; run();
+    CHECK(!memory[symbol("RAW_INPUT")]); invoke("LTRAP"); CHECK(input_reads == 0);
+    fail_call = -1; keys[0] = 'z'; key_size = 1; invoke("OSRDCH"); CHECK(cpu.a == 'z');
+    reset("OSINIT"); set_bc(8); set_de(0x7d00);
+    strcpy((char *)memory + 0x7d00, "test.bbc"); run();
+    CHECK(!cpu.zf); CHECK(memory[symbol("RAW_INPUT")] == 1);
+    CHECK(!memcmp(memory + symbol("ACCS"), "test.bbc", 8));
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -192,6 +312,8 @@ int main(int argc, char **argv) {
     test_loads();
     test_saves();
     test_chain_names();
+    test_bundled_loads();
+    test_escape();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }
