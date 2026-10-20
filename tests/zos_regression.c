@@ -622,6 +622,69 @@ static void test_cursor_width(void) {
         if (tab) CHECK(cursor_x == 5 && cursor_y == 10);
     }
 }
+/* Regenerate records with BASIC's own lexer, so example checks use exactly
+ * the token and encoded-line-number format accepted by this interpreter. */
+static unsigned tokenize_source(const char *path, uint8_t *dest) {
+    FILE *fp = fopen(path, "r"); assert(fp);
+    char line[1024]; unsigned length = 0, previous = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        char *text; unsigned number = strtoul(line, &text, 10);
+        if (text == line || !number) continue; /* unnumbered attribution */
+        assert(number > previous && number < 65536); previous = number;
+        while (*text == ' ' || *text == '\t') text++;
+        text[strcspn(text, "\r\n")] = 0;
+        assert(strlen(text) < 255);
+        reset("LEXAN2"); strcpy((char *)memory + 0xf200, text);
+        memory[0xf200 + strlen(text)] = 10;
+        cpu.iy = 0xf200; set_de(0xf000); cpu.c = 1; run();
+        assert(!basic_error && cpu.a == 10 && cpu.d == 0xf0);
+        unsigned size = cpu.e;
+        assert(size <= 251 && length + size + 7 < 65536);
+        dest[length++] = size + 4;
+        dest[length++] = number; dest[length++] = number >> 8;
+        memcpy(dest + length, memory + 0xf000, size); length += size;
+        dest[length++] = 10;
+    }
+    fclose(fp); dest[length++] = 0; dest[length++] = 255; dest[length++] = 255;
+    return length;
+}
+static unsigned example_line(const uint8_t *program, unsigned number) {
+    for (unsigned pos = 0; program[pos]; pos += program[pos]) {
+        if ((program[pos+1] | program[pos+2] << 8) == number) return pos;
+    }
+    fprintf(stderr, "Missing example line %u\n", number); exit(1);
+}
+static void test_hamurabi_source(void) {
+    uint8_t expected[65536], actual[65536];
+    unsigned size = tokenize_source("examples/hamurabi.bas", expected);
+    FILE *fp = fopen("examples/hamurabi.bbc", "rb"); assert(fp);
+    unsigned actual_size = fread(actual, 1, sizeof(actual), fp); fclose(fp);
+    CHECK(actual_size == size); CHECK(!memcmp(actual, expected, size));
+    unsigned purchase = example_line(actual, 331), retry = example_line(actual, 470);
+    reset("XEQ"); program_error_location();
+    memory[symbol("TOP")] = 8; invoke("CLEAR");
+    unsigned pos = 0xf200;
+    const char *init = "A=1000:S=2800:Y=20:Q=5:C=9:";
+    memcpy(memory + pos, init, strlen(init)); pos += strlen(init);
+    memcpy(memory + pos, actual + purchase + 3, actual[purchase] - 4); pos += actual[purchase] - 4;
+    const char *result = ":A%=A:S%=S:C%=C:";
+    memcpy(memory + pos, result, strlen(result)); pos += strlen(result);
+    memory[pos++] = 0xe0; memory[pos] = 10;
+    cpu.iy = 0xf200; stop_pc = symbol("CLOOP"); invoke("XEQ");
+    CHECK(!basic_error);
+    unsigned vars = symbol("STAVAR");
+    CHECK((memory[vars+4] | memory[vars+5] << 8) == 1005);
+    CHECK((memory[vars+76] | memory[vars+77] << 8) == 2700);
+    CHECK(memory[vars+12] == 0 && memory[vars+13] == 0);
+    reset("XEQ"); memcpy(memory + 0x8000, actual, size);
+    stop_pc = symbol("exec:XEQ0"); unsigned stack = cpu.sp;
+    for (unsigned attempt = 0; attempt < 20; ++attempt) {
+        cpu.pc = symbol("XEQ"); cpu.iy = 0x8000 + retry + 3; run();
+        CHECK(!basic_error); CHECK(cpu.sp == stack);
+        CHECK(cpu.iy == 0x8000 + example_line(actual, 440));
+    }
+
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -645,6 +708,7 @@ int main(int argc, char **argv) {
     test_arguments();
     test_commands();
     test_cursor_width();
+    test_hamurabi_source();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }
