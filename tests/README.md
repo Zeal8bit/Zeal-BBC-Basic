@@ -50,3 +50,11 @@ and preserves the original BASIC error during best-effort error cleanup.
 Line-input checks cover bounded cooked reads, missing terminators, read failures,
 EOF, redirected CRLF streams and overlong-line recovery. Redirected input reads
 through one LF at a time; overlong lines are drained and reported as errors.
+
+Cursor checks compare numeric PRINT output with and without two-coordinate TAB,
+including a video driver that overwrites scratch registers. Example checks use
+the assembled BASIC lexer: Hamurabi's binary must match its numbered text source,
+land purchases must update acreage and grain, and planting retries must preserve
+stack depth. Blackjack's text source is tokenized and its score procedure is run
+with a one-player hand through the pause and return. These are focused gameplay
+checks rather than complete interactive playthroughs.

@@ -622,6 +622,15 @@ static void test_cursor_width(void) {
         if (tab) CHECK(cursor_x == 5 && cursor_y == 10);
     }
 }
+static unsigned tokenize_text(const char *text, uint8_t *dest) {
+    assert(strlen(text) < 255);
+    reset("LEXAN2"); strcpy((char *)memory + 0xf200, text);
+    memory[0xf200 + strlen(text)] = 10;
+    cpu.iy = 0xf200; set_de(0xf000); cpu.c = 1; run();
+    assert(!basic_error && cpu.a == 10 && cpu.d == 0xf0);
+    unsigned size = cpu.e; memcpy(dest, memory + 0xf000, size);
+    return size;
+}
 /* Regenerate records with BASIC's own lexer, so example checks use exactly
  * the token and encoded-line-number format accepted by this interpreter. */
 static unsigned tokenize_source(const char *path, uint8_t *dest) {
@@ -633,16 +642,11 @@ static unsigned tokenize_source(const char *path, uint8_t *dest) {
         assert(number > previous && number < 65536); previous = number;
         while (*text == ' ' || *text == '\t') text++;
         text[strcspn(text, "\r\n")] = 0;
-        assert(strlen(text) < 255);
-        reset("LEXAN2"); strcpy((char *)memory + 0xf200, text);
-        memory[0xf200 + strlen(text)] = 10;
-        cpu.iy = 0xf200; set_de(0xf000); cpu.c = 1; run();
-        assert(!basic_error && cpu.a == 10 && cpu.d == 0xf0);
-        unsigned size = cpu.e;
+        uint8_t body[256]; unsigned size = tokenize_text(text, body);
         assert(size <= 251 && length + size + 7 < 65536);
         dest[length++] = size + 4;
         dest[length++] = number; dest[length++] = number >> 8;
-        memcpy(dest + length, memory + 0xf000, size); length += size;
+        memcpy(dest + length, body, size); length += size;
         dest[length++] = 10;
     }
     fclose(fp); dest[length++] = 0; dest[length++] = 255; dest[length++] = 255;
@@ -685,6 +689,30 @@ static void test_hamurabi_source(void) {
     }
 
 }
+static void test_blackjack_procedure(void) {
+    uint8_t program[65536], init[256];
+    unsigned size = tokenize_source("examples/blackjack.bas", program);
+    /* Run the source-defined score procedure with a populated one-player hand. */
+    unsigned init_size = tokenize_text(
+        "DIM playname$(1),score%(1),numofcards%(1):numplayer%=1:"
+        "playname$(1)=\"Ada\":score%(1)=21:numofcards%(1)=2:PROCwhoone:END", init);
+    unsigned definition = example_line(program, 1940), call = example_line(program, 1060);
+    CHECK(program[call + 3] == 0xf2); /* PROC */
+    CHECK(!memcmp(program + call + 4, "whoone", 6));
+    CHECK(program[definition + 3] == 0xdd && program[definition + 4] == 0xf2); /* DEF PROC */
+    CHECK(!memcmp(program + definition + 5, "whoone\n", 7));
+    reset("XEQ"); program_error_location();
+    memcpy(memory + 0x8000, program, size);
+    unsigned top = 0x8000 + size;
+    memory[symbol("TOP")] = top; memory[symbol("TOP") + 1] = top >> 8;
+    invoke("CLEAR");
+    memcpy(memory + 0xf200, init, init_size); memory[0xf200 + init_size] = 10;
+    keys[0] = 'x'; key_size = 1; cpu.iy = 0xf200; stop_pc = symbol("CLOOP"); invoke("XEQ");
+    CHECK(!basic_error); CHECK(!exited); CHECK(cpu.pc == stop_pc);
+    CHECK(strstr(output, "Ada got a total score of 21") != NULL);
+    CHECK(strstr(output, "using 2 press enter too continue...") != NULL);
+    CHECK(key_pos == 1);
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -709,6 +737,7 @@ int main(int argc, char **argv) {
     test_commands();
     test_cursor_width();
     test_hamurabi_source();
+    test_blackjack_procedure();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }
