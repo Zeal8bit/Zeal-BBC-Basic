@@ -42,10 +42,17 @@ void vtimer_tick(uint64_t elapsed) { (void)elapsed; }
 uint64_t vtimer_stall_bus(uint64_t maximum, const bool *requested) { (void)requested; return maximum; }
 
 static uint16_t symbol(const char *name) {
+    char module[128] = "";
+    const char *separator = strchr(name, ':');
+    if (separator) {
+        snprintf(module, sizeof(module), ", %.*s,", (int)(separator - name), name);
+        name = separator + 1;
+    }
     FILE *fp = fopen(map_path, "r"); assert(fp);
     char line[512], found[128]; unsigned address, fallback = 0; int matched = 0;
     while (fgets(line, sizeof(line), fp)) {
         if (sscanf(line, "%127s = $%x", found, &address) == 2 && !strcmp(name, found)) {
+            if (*module && !strstr(line, module)) continue;
             if (strstr(line, ", public,")) { fclose(fp); return address; }
             if (!matched) { fallback = address; matched = 1; }
         }
@@ -323,7 +330,7 @@ static void test_ext(void) {
         reset("GETEXT"); cpu.e = 2; file_size = sizes[i]; file_pos = 1; run();
         uint32_t value = (uint32_t)cpu.d << 24 | (uint32_t)cpu.e << 16 | cpu.h << 8 | cpu.l;
         CHECK(!basic_error); CHECK(value == sizes[i]); CHECK(file_pos == 1);
-        reset("EXT"); file_size = sizes[i];
+        reset("eval:EXT"); file_size = sizes[i];
         strcpy((char *)memory + 0xf200, "#2\n"); cpu.iy = 0xf200; run();
         value = (uint32_t)cpu.h << 24 | (uint32_t)cpu.l << 16 | cpu.h_ << 8 | cpu.l_;
         CHECK(!basic_error); CHECK(value == sizes[i]);
@@ -550,6 +557,42 @@ static void test_arguments(void) {
         } else { CHECK(memory[acc] == 0); CHECK(memory[acc + 1] == 0xaa); }
     }
 }
+static void test_commands(void) {
+    const char *commands[] = {"", "\n", " \t\n", " | comment\n", "|BYE",
+        "BYE", "bye\n", " \tbYe \t\n", "cPm\n", "CPM\r",
+        "DIR\n", "BYEX\n", "BYE arg\n", "BY\n", "anything", "CPM.\n"};
+    for (unsigned i = 0; i < sizeof(commands)/sizeof(*commands); ++i) {
+        reset("OPENIN"); open_basic();
+        strcpy((char *)memory + 0xf200, commands[i]); set_hl(0xf200); cpu.iy = 0xf345;
+        invoke("OSCLI");
+        CHECK(cpu.iy == 0xf345);
+        if (i >= 5 && i <= 9) {
+            CHECK(exited); CHECK(!basic_error); CHECK(closed == 1); CHECK(!native_open[2]);
+        } else {
+            CHECK(!exited); CHECK(closed == 0); CHECK(native_open[2]);
+            CHECK(basic_error == (i >= 10 ? 254 : 0));
+        }
+    }
+    /* The two interpreter entry paths must share the same dispatch. */
+    reset("CLI"); strcpy((char *)memory + 0xf200, "\"DIR\"\n"); cpu.iy = 0xf200; run();
+    CHECK(basic_error == 254); CHECK(!exited);
+    reset("exec:EXT"); strcpy((char *)memory + 0xf200, "DIR\n"); cpu.iy = 0xf200; run();
+    CHECK(basic_error == 254); CHECK(!exited);
+    reset("CLI"); strcpy((char *)memory + 0xf200, "\"bye\"\n"); cpu.iy = 0xf200; run();
+    CHECK(exited); CHECK(!basic_error);
+    reset("exec:EXT"); strcpy((char *)memory + 0xf200, "bye\n"); cpu.iy = 0xf200; run();
+    CHECK(exited); CHECK(!basic_error);
+    reset("RUN0"); program_error_location();
+    const uint8_t commented[] = {12,10,0,'*','|','c','o','m','m','e','n',10,
+        5,20,0,0xe0,10,0,255,255};
+    memcpy(memory + 0x8000, commented, sizeof(commented));
+    stop_pc = symbol("WARM"); run();
+    CHECK(!basic_error); CHECK(!exited); CHECK(cpu.pc == stop_pc);
+    reset("CLI"); strcpy((char *)memory + 0xf200, "\"\":\340\n"); cpu.iy = 0xf200;
+    program_error_location(); stop_pc = symbol("CLOOP"); run();
+    CHECK(!basic_error); CHECK(!exited); CHECK(cpu.pc == stop_pc);
+
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -571,6 +614,7 @@ int main(int argc, char **argv) {
     test_characters();
     test_lines();
     test_arguments();
+    test_commands();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }

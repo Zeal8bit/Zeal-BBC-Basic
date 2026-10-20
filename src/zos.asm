@@ -1088,8 +1088,59 @@ KEY_DEQUEUE:
 ;OSCLI - Process an "operating system" command
 ;
 OSCLI:
-        jp BYE
-        ret
+        call CLI_SPACE
+        or a
+        ret z
+        cp 10
+        ret z
+        cp 13
+        ret z
+        cp '|'
+        ret z
+        and 0xdf
+        cp 'B'
+        jr z, CLI_BYE
+        cp 'C'
+        jr nz, CLI_BAD
+        ld de, CLI_CPM_TEXT
+        jr CLI_MATCH
+CLI_BYE:
+        ld de, CLI_BYE_TEXT
+CLI_MATCH:
+        ld b, 3
+CLI_LETTER:
+        ld a, (hl)
+        and 0xdf
+        ld c, a
+        ld a, (de)
+        cp c
+        jr nz, CLI_BAD
+        inc hl
+        inc de
+        djnz CLI_LETTER
+        call CLI_SPACE
+        or a
+        jp z, BYE
+        cp 10
+        jp z, BYE
+        cp 13
+        jp z, BYE
+CLI_BAD:
+        ld a, 254
+        call EXTERR
+        DEFM "Bad command"
+        DEFB 0
+CLI_SPACE:
+        ld a, (hl)
+        cp ' '
+        jr z, CLI_NEXT
+        cp 9
+        ret nz
+CLI_NEXT:
+        inc hl
+        jr CLI_SPACE
+CLI_BYE_TEXT: DEFM "BYE"
+CLI_CPM_TEXT: DEFM "CPM"
 
 ;
 ;OSKEY - Read key with time-limit, test for ESCape.

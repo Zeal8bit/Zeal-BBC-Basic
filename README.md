@@ -19,3 +19,11 @@ Use the [Zeal development environment](https://github.com/Zeal8bit/zeal-dev-envi
 ```sh
 zde cmake
 ```
+
+## Operating-system commands
+
+`*BYE` (or `OSCLI "BYE"`) closes BASIC-owned files and exits to Zeal OS.
+`CPM` is retained as an exit alias. Command names are case-insensitive; leading
+and trailing spaces and tabs are accepted. Empty commands and `*|` comments
+return to BASIC. Other commands, including the original CP/M disk commands,
+raise trappable error 254, `Bad command`.
