@@ -535,6 +535,21 @@ static void test_lines(void) {
     CHECK(!basic_error); CHECK(!memcmp(memory + 0xf100, "ok\n", 3));
     reset("OSLINE"); mode_failure = 1; run(); CHECK(basic_error == (128 | 1)); CHECK(input_reads == 0);
 }
+static void test_arguments(void) {
+    const unsigned lengths[] = {0,1,127,255,256,257,65535};
+    for (unsigned i = 0; i < 7; ++i) {
+        reset("OSINIT"); unsigned length = lengths[i], acc = symbol("ACCS");
+        memset(memory + 0xe000, 'a', 256); memset(memory + acc, 0xaa, 257);
+        set_bc(length); set_de(0xe000); run();
+        CHECK(!basic_error); CHECK(!exited); CHECK(cpu.zf == (length == 0 || length > 255));
+        CHECK(memory[acc + 256] == 0xaa);
+        CHECK((cpu.h << 8 | cpu.l) == symbol("USER")); CHECK((cpu.d << 8 | cpu.e) == 0xf800);
+        if (length <= 255) {
+            CHECK(memory[acc + length] == 0);
+            for (unsigned j = 0; j < length; ++j) CHECK(memory[acc + j] == 'a');
+        } else { CHECK(memory[acc] == 0); CHECK(memory[acc + 1] == 0xaa); }
+    }
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
@@ -555,6 +570,7 @@ int main(int argc, char **argv) {
     test_escape();
     test_characters();
     test_lines();
+    test_arguments();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }

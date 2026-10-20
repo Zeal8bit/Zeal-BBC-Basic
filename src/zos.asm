@@ -74,16 +74,25 @@
 ;
 OSINIT:
         di       ; disable interrupts
+        xor a
+        ld (ACCS), a
         ld a, b
+        or a
+        jr nz, ARG_TOO_LONG    ; maximum 255 bytes plus a terminating NUL
         or c
         jr z, SKIPLOAD
-        ; load file
-
-        ld hl, ACCS ; copy filename to string buffer
+        ld hl, ACCS
         ex de, hl
         ldir
-        ; Reset Z flag
-        or 1
+        xor a
+        ld (de), a
+        or 1                   ; auto-run only a bounded, terminated filename
+        jr SKIPLOAD
+ARG_TOO_LONG:
+        call TELL
+        DEFM "Startup filename too long"
+        DEFB 10,0
+        xor a                  ; report safely before cold-start HIMEM is set
 SKIPLOAD:
         push af                 ; preserve the auto-run decision
         ld hl, FILE_CHANNELS
