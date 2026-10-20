@@ -14,12 +14,8 @@ The original sources released by R.T. Russell are in the initial commit.  The fo
 
 ## Build Instructions
 
-Download and install [z88dk](https://github.com/z88dk/z88dk) (compile if necessary). Make sure z88dk's `bin` directory containing `z80asm` is in your path.
+Use the [Zeal development environment](https://github.com/Zeal8bit/zeal-dev-environment) to build `build/bbcbasic.bin`:
 
-Run `make` to build bbcbasic.bin.
-
-If make is not available, run:
-
-```
-z80asm -obbcbasic.com -b -d -l -m main.asm exec.asm eval.asm fpp.asm hardware.asm cpm.asm ram.asm
+```sh
+zde cmake
 ```
