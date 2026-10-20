@@ -261,7 +261,6 @@ OSBPUT:
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSLOAD:
-        ; Open the file for writing
         push de
         push bc
         ld b, h
@@ -270,23 +269,110 @@ OSLOAD:
         OPEN()
         pop bc
         pop de
-        ; Check for errors
         or a
         jp m, SHOW_ERROR_NEG
-        ; Read the data
         ld h, a
-        ld bc, 0x2000   ; TODO: load data in chunks up to BC (free memory size)
-        READ()
+        ; Inspect the full size before touching BASIC memory. Stat starts with
+        ; one flags byte, followed by a little-endian 32-bit size.
+        push hl
+        push de
+        push bc
+        ld de, BUFFER
+        DSTAT()
         or a
-        jp nz, CLOSE_ERROR
-        ld (OSLOAD_SIZE), bc
+        jr nz, LOAD_STAT_ERROR
+        ld hl, (BUFFER + 3)
+        ld a, h
+        or l
+        jr nz, LOAD_TOO_LARGE
+        ld hl, (BUFFER + 1)
+        pop bc
+        or a
+        sbc hl, bc
+        pop de
+        pop hl
+        jr c, LOAD_FITS
+        jr z, LOAD_FITS
+LOAD_NO_ROOM:
         CLOSE()
         or a
         jp nz, SHOW_ERROR
-        scf   ; For now, always accept the file, do not check the size
+        or a                    ; carry clear: LOAD0 reports "No room"
+        ret
+LOAD_TOO_LARGE:
+        pop bc
+        pop de
+        pop hl
+        jr LOAD_NO_ROOM
+LOAD_STAT_ERROR:
+        pop bc
+        pop de
+        pop hl
+        jp CLOSE_ERROR
+LOAD_FITS:
+        ld bc, (BUFFER + 1)
+        ld (OSLOAD_SIZE), bc
+        ld (FILE_REMAIN), bc
+        ld l, 0                 ; Zeal read syscall
+        call FILE_TRANSFER
+        CLOSE()
+        or a
+        jp nz, SHOW_ERROR
+        scf
         ret
 
-OSLOAD_SIZE: DEFW 0x2000
+OSLOAD_SIZE: DEFW 0
+FILE_REMAIN: DEFW 0
+
+; Transfer FILE_REMAIN bytes, splitting requests at virtual-page boundaries.
+; H = channel, L = read/write syscall, DE = address. Retry short transfers.
+FILE_TRANSFER:
+        ld bc, (FILE_REMAIN)
+        ld a, b
+        or c
+        ret z
+        call FILE_CHUNK
+        SYSCALL
+        or a
+        jp nz, CLOSE_ERROR
+        ld a, b
+        or c
+        jr z, FILE_STALLED       ; EOF before stat size, or no write progress
+        push hl
+        ld hl, (FILE_REMAIN)
+        or a
+        sbc hl, bc
+        ld (FILE_REMAIN), hl
+        ld h, b
+        ld l, c
+        add hl, de
+        ex de, hl
+        pop hl
+        jr FILE_TRANSFER
+FILE_STALLED:
+        ld a, ERR_FAILURE
+        jp CLOSE_ERROR
+
+; BC = min(BC, bytes until next 16KB boundary). Preserve HL and DE.
+FILE_CHUNK:
+        push hl
+        push de
+        ld a, d
+        and 0x3f
+        ld d, a
+        ld hl, 0x4000
+        or a
+        sbc hl, de
+        or a
+        sbc hl, bc
+        jr nc, FILE_CHUNK_READY
+        add hl, bc
+        ld b, h
+        ld c, l
+FILE_CHUNK_READY:
+        pop de
+        pop hl
+        ret
 
 ;OSSAVE - Save an area of memory to a file.
 ;   Inputs: HL addresses filename (term CR)

@@ -14,6 +14,7 @@ static uint8_t memory[65536], image[65536], file[65536];
 static const char *map_path;
 static uint32_t file_size, file_pos;
 static int fail_call, failure, close_failure, short_limit, opened, closed, transfers;
+static int fail_transfer, premature_eof;
 static int basic_error, invalid_buffer;
 static unsigned last_flags;
 static char opened_name[256];
@@ -51,6 +52,7 @@ static void reset(const char *entry) {
     memory[cpu.sp] = 0; memory[cpu.sp + 1] = 0x30;
     fail_call = -1; failure = 19; close_failure = 0; short_limit = -1;
     opened = closed = transfers = basic_error = invalid_buffer = 0;
+    fail_transfer = premature_eof = 0;
     file_pos = 0; file_size = 16; opened_name[0] = 0;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0x7c00, "test.bbc");
@@ -76,10 +78,12 @@ static void syscall(void) {
         break;
     case 0: case 1:
         transfers++;
+        if (transfers == fail_transfer) { cpu.a = failure; break; }
         if (count > 0x4000 || (address & 0x3fff) + count > 0x4000) {
             invalid_buffer++; cpu.a = 6; break;
         }
         if (short_limit >= 0 && count > (unsigned)short_limit) count = short_limit;
+        if (call == 0 && premature_eof) count = 0;
         if (call == 0) {
             if (count > file_size - file_pos) count = file_size - file_pos;
             memcpy(memory + address, file + file_pos, count);
@@ -123,12 +127,36 @@ static void test_errors(void) {
     reset("OSSAVE"); short_limit = 0; run(); CHECK(basic_error == (128 | 1)); CHECK(closed == 1);
     reset("OSBPUT"); short_limit = 0; run(); CHECK(basic_error == (128 | 1));
 }
+static void test_loads(void) {
+    const unsigned lengths[] = {0, 1, 8191, 8192, 8193, 13914, 16384, 16385, 28000};
+    for (unsigned i = 0; i < sizeof(lengths) / sizeof(*lengths); ++i) {
+        reset("OSLOAD"); file_size = lengths[i]; set_bc(0x7000); run();
+        CHECK(!basic_error); CHECK(cpu.cf); CHECK(closed == 1);
+        CHECK(file_pos == file_size); CHECK(!invalid_buffer);
+        CHECK(!memcmp(memory + 0x8000, file, file_size));
+    }
+    reset("OSLOAD"); file_size = 17; memory[0x8000] = 0xaa; run();
+    CHECK(!cpu.cf); CHECK(!basic_error); CHECK(transfers == 0);
+    CHECK(memory[0x8000] == 0xaa); CHECK(closed == 1);
+    reset("OSLOAD"); file_size = 65536; set_bc(0x7000); run();
+    CHECK(!cpu.cf); CHECK(!basic_error); CHECK(transfers == 0); CHECK(closed == 1);
+    reset("OSLOAD"); file_size = 10000; set_de(0xbffd); set_bc(10000); short_limit = 257; run();
+    CHECK(!basic_error); CHECK(cpu.cf); CHECK(!invalid_buffer);
+    CHECK(!memcmp(memory + 0xbffd, file, file_size));
+    reset("OSLOAD"); fail_call = 4; run();
+    CHECK(basic_error == (128 | 19)); CHECK(closed == 1); CHECK(transfers == 0);
+    reset("OSLOAD"); premature_eof = 1; run();
+    CHECK(basic_error == (128 | 1)); CHECK(closed == 1);
+    reset("OSLOAD"); file_size = 17000; set_bc(20000); fail_transfer = 2; run();
+    CHECK(basic_error == (128 | 19)); CHECK(closed == 1);
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
     FILE *fp = fopen(argv[1], "rb"); assert(fp);
     size_t length = fread(image + 0x4000, 1, 0xc000, fp); fclose(fp); assert(length > 0);
     test_errors();
+    test_loads();
     printf("PASS: %u adapter regression checks\n", checks);
     return 0;
 }
