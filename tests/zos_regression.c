@@ -26,6 +26,8 @@ static unsigned key_size, key_pos, keyboard_mode;
 static int inject_interrupt, interrupt_seen, escape_after_reads, input_reads;
 static int partial_release;
 static int file_exists;
+static uint8_t native_open[128], close_errors[128];
+static unsigned close_attempts[128], first_descriptor, exited;
 static void invoke(const char *entry);
 
 static uint8_t read_ram(device_t *dev, uint32_t address) { (void)dev; return memory[address & 65535]; }
@@ -40,12 +42,15 @@ uint64_t vtimer_stall_bus(uint64_t maximum, const bool *requested) { (void)reque
 
 static uint16_t symbol(const char *name) {
     FILE *fp = fopen(map_path, "r"); assert(fp);
-    char line[512], found[128]; unsigned address;
+    char line[512], found[128]; unsigned address, fallback = 0; int matched = 0;
     while (fgets(line, sizeof(line), fp)) {
         if (sscanf(line, "%127s = $%x", found, &address) == 2 && !strcmp(name, found)) {
-            fclose(fp); return address;
+            if (strstr(line, ", public,")) { fclose(fp); return address; }
+            if (!matched) { fallback = address; matched = 1; }
         }
     }
+    fclose(fp);
+    if (matched) return fallback;
     fprintf(stderr, "Missing symbol: %s\n", name); exit(1);
 }
 static void set_bc(unsigned v) { cpu.b = v >> 8; cpu.c = v; }
@@ -68,9 +73,12 @@ static void reset(const char *entry) {
     inject_interrupt = interrupt_seen = escape_after_reads = input_reads = 0;
     partial_release = 0;
     file_exists = 1; last_flags = 2;
+    memset(native_open, 0, sizeof(native_open)); native_open[0] = native_open[1] = 1;
+    memset(close_errors, 0, sizeof(close_errors)); memset(close_attempts, 0, sizeof(close_attempts));
+    first_descriptor = 2; exited = 0;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
-    strcpy((char *)memory + 0x7c00, "test.bbc");
-    set_hl(0x7c00); set_de(0x8000); set_bc(16);
+    strcpy((char *)memory + 0xf100, "test.bbc");
+    set_hl(0xf100); set_de(0x8000); set_bc(16);
 }
 static void syscall(void) {
     unsigned call = cpu.l, address = cpu.d << 8 | cpu.e, count = cpu.b << 8 | cpu.c;
@@ -78,16 +86,24 @@ static void syscall(void) {
     cpu.a = 0;
     if ((int)call == fail_call) { cpu.a = call == 2 ? (uint8_t)-failure : failure; }
     else switch (call) {
-    case 2:
+    case 2: {
         if (!file_exists && !(cpu.h & 16)) { cpu.a = (uint8_t)-4; break; }
+        unsigned descriptor = first_descriptor;
+        while (descriptor < 128 && native_open[descriptor]) descriptor++;
+        if (descriptor == 128) { cpu.a = (uint8_t)-20; break; }
         opened++; last_flags = cpu.h; file_exists = 1; file_pos = 0;
         for (unsigned i = 0; i < sizeof(opened_name) - 1; ++i) {
             opened_name[i] = memory[(uint16_t)(count + i)];
             if (!opened_name[i]) break;
         }
         if (last_flags & 4) file_size = 0;
-        cpu.a = 2; break;
-    case 3: closed++; cpu.a = close_failure; break;
+        native_open[descriptor] = 1; cpu.a = descriptor; break;
+    }
+    case 3:
+        assert(cpu.h < 128); closed++; close_attempts[cpu.h]++;
+        cpu.a = !native_open[cpu.h] ? 13 : close_errors[cpu.h] ? close_errors[cpu.h] : close_failure;
+        if (!cpu.a) native_open[cpu.h] = 0;
+        break;
     case 4:
         memset(memory + address, 0, 29); memory[address] = 1;
         for (int i = 0; i < 4; ++i) memory[address + 1 + i] = file_size >> (8 * i);
@@ -133,6 +149,7 @@ static void syscall(void) {
         set_bc(file_pos >> 16); set_de(file_pos & 65535); break;
     }
     case 7: keyboard_mode = cpu.e; break;
+    case 15: exited = 1; cpu.pc = 0x3000; return;
     default: fprintf(stderr, "Unexpected syscall: %u\n", call); exit(1);
     }
     /* Zeal returns status in A. Deliberately do not promise meaningful flags. */
@@ -159,7 +176,9 @@ static void test_errors(void) {
     const char *entries[] = {"OSLOAD", "OSSAVE", "OSBGET", "OSBPUT", "OSSHUT", "GETEXT", "GETPTR", "PUTPTR"};
     const int calls[] = {2, 2, 0, 1, 3, 4, 6, 6};
     for (unsigned i = 0; i < sizeof(calls) / sizeof(*calls); ++i) {
-        reset(entries[i]); cpu.e = 2; cpu.a = 2; fail_call = calls[i]; run();
+        reset(entries[i]); cpu.e = 2; cpu.a = 2; fail_call = calls[i];
+        if (!strcmp(entries[i], "OSSHUT")) { memory[symbol("FILE_CHANNELS") + 2] = 1; native_open[2] = 1; }
+        run();
         CHECK(basic_error == (128 | failure));
     }
     reset("OSLOAD"); fail_call = 0; close_failure = 6; run();
@@ -209,7 +228,7 @@ static void test_saves(void) {
     CHECK(basic_error == (128 | 19)); CHECK(closed == 1);
 }
 static void open_basic(void) {
-    strcpy((char *)memory + 0x7d00, "\"test.bbc\"\n"); cpu.iy = 0x7d00;
+    strcpy((char *)memory + 0xf200, "\"test.bbc\"\n"); cpu.iy = 0xf200;
     run();
 }
 static void test_openout(void) {
@@ -264,7 +283,7 @@ static void test_eof(void) {
     /* The evaluator must translate the adapter's Z flag to BASIC TRUE/FALSE. */
     for (int eof = 0; eof < 2; ++eof) {
         reset("EOF"); file_size = 1; file_pos = eof;
-        strcpy((char *)memory + 0x7d00, "#2\n"); cpu.iy = 0x7d00; run();
+        strcpy((char *)memory + 0xf200, "#2\n"); cpu.iy = 0xf200; run();
         uint32_t value = (uint32_t)cpu.h << 24 | (uint32_t)cpu.l << 16 | cpu.h_ << 8 | cpu.l_;
         CHECK(!basic_error); CHECK(value == (eof ? UINT32_MAX : 0));
     }
@@ -276,11 +295,60 @@ static void test_ext(void) {
         uint32_t value = (uint32_t)cpu.d << 24 | (uint32_t)cpu.e << 16 | cpu.h << 8 | cpu.l;
         CHECK(!basic_error); CHECK(value == sizes[i]); CHECK(file_pos == 1);
         reset("EXT"); file_size = sizes[i];
-        strcpy((char *)memory + 0x7d00, "#2\n"); cpu.iy = 0x7d00; run();
+        strcpy((char *)memory + 0xf200, "#2\n"); cpu.iy = 0xf200; run();
         value = (uint32_t)cpu.h << 24 | (uint32_t)cpu.l << 16 | cpu.h_ << 8 | cpu.l_;
         CHECK(!basic_error); CHECK(value == sizes[i]);
     }
     reset("GETEXT"); cpu.e = 2; fail_call = 4; run(); CHECK(basic_error == (128 | 19));
+}
+static void open_more(unsigned descriptor) {
+    first_descriptor = descriptor;
+    strcpy((char *)memory + 0xf200, "\"test.bbc\"\n"); cpu.iy = 0xf200;
+    invoke("OPENIN"); CHECK(cpu.l_ == descriptor); CHECK(!basic_error);
+}
+static void program_error_location(void) {
+    unsigned page = symbol("PAGE"), himem = symbol("HIMEM"), errlin = symbol("ERRLIN");
+    memory[page] = 0; memory[page + 1] = 0x80;
+    memory[himem] = 0; memory[himem + 1] = 0xf7;
+    memory[errlin] = 3; memory[errlin + 1] = 0x80;
+    const uint8_t program[] = {5, 10, 0, 0xe0, 10, 0, 0xff, 0xff};
+    memcpy(memory + 0x8000, program, sizeof(program));
+}
+static void test_close_all(void) {
+    reset("OPENIN"); native_open[7] = 1; open_basic(); open_more(5); open_more(127);
+    unsigned owned = symbol("FILE_CHANNELS");
+    CHECK(memory[owned + 2] && memory[owned + 5] && memory[owned + 127]);
+    cpu.e = 2; invoke("OSSHUT"); CHECK(!memory[owned + 2]); CHECK(!native_open[2]);
+    cpu.e = 0; invoke("OSSHUT"); CHECK(!basic_error); CHECK(closed == 3);
+    CHECK(!native_open[5] && !native_open[127]); CHECK(native_open[0] && native_open[1] && native_open[7]);
+    CHECK(!close_attempts[0] && !close_attempts[1] && !close_attempts[7]);
+    cpu.e = 0; invoke("OSSHUT"); CHECK(closed == 3);
+    reset("OSSHUT"); native_open[7] = 1; cpu.e = 7; run();
+    CHECK(basic_error == (128 | 13)); CHECK(!closed); CHECK(native_open[7]);
+    reset("OSSHUT"); cpu.e = 128; run(); CHECK(basic_error == (128 | 13)); CHECK(!closed);
+    reset("OPENIN"); open_basic(); open_more(5); open_more(127);
+    close_errors[2] = 6; close_errors[5] = 19; cpu.e = 0; invoke("OSSHUT");
+    CHECK(basic_error == (128 | 6)); CHECK(closed == 3);
+    CHECK(memory[owned + 2] && memory[owned + 5] && !memory[owned + 127]);
+    CHECK(!native_open[127]); close_errors[2] = close_errors[5] = 0; basic_error = 0;
+    cpu.e = 0; invoke("OSSHUT"); CHECK(!basic_error); CHECK(closed == 5);
+    CHECK(!memory[owned + 2] && !memory[owned + 5]); CHECK(close_attempts[127] == 1);
+    reset("OPENIN"); fail_call = 2; open_basic();
+    fail_call = -1; cpu.e = 0; invoke("OSSHUT"); CHECK(!closed);
+    reset("OSLOAD"); run(); CHECK(!memory[owned + 2]); CHECK(!native_open[2]);
+    reset("OSSAVE"); close_failure = 6; run(); CHECK(memory[owned + 2]);
+    close_failure = 0; basic_error = 0; cpu.e = 0; invoke("OSSHUT");
+    CHECK(!basic_error); CHECK(!memory[owned + 2]); CHECK(closed == 2);
+    reset("OPENIN"); first_descriptor = 0; native_open[0] = 0; open_basic();
+    CHECK(cpu.l_ == 0); CHECK(!native_open[0]); CHECK(!memory[owned]);
+    reset("OPENIN"); open_basic(); program_error_location(); stop_pc = symbol("WARM");
+    invoke("END"); CHECK(cpu.pc == stop_pc); CHECK(!native_open[2]); CHECK(!memory[owned + 2]);
+    reset("OPENIN"); open_basic(); open_more(5); program_error_location(); close_errors[2] = 6;
+    follow_basic_error = 1; stop_pc = symbol("CLOOP"); cpu.a = 18; invoke("ERROR");
+    CHECK(cpu.pc == stop_pc); CHECK(memory[symbol("ERR")] == 18);
+    CHECK(memory[owned + 2]); CHECK(!memory[owned + 5]); CHECK(!native_open[5]);
+    reset("OPENIN"); open_basic(); invoke("BYE"); CHECK(exited); CHECK(!native_open[2]);
+    CHECK(native_open[0] && native_open[1]); CHECK(keyboard_mode == 1);
 }
 static void test_chain_names(void) {
     const char *entries[] = {"CHAIN", "RUN"};
@@ -288,7 +356,7 @@ static void test_chain_names(void) {
         reset(entries[i]);
         unsigned accs = symbol("ACCS"), himem = symbol("HIMEM"), page = symbol("PAGE");
         memset(memory + accs, 'X', 256);
-        strcpy((char *)memory + 0x7d00, "\"test.bbc\"\n"); cpu.iy = 0x7d00;
+        strcpy((char *)memory + 0xf200, "\"test.bbc\"\n"); cpu.iy = 0xf200;
         memory[himem] = 0; memory[himem + 1] = 0xf7;
         memory[page] = 0; memory[page + 1] = 0x80;
         file_size = 3; file[0] = 0; file[1] = file[2] = 0xff;
@@ -306,7 +374,7 @@ static void test_bundled_loads(void) {
         unsigned page = symbol("PAGE"), himem = symbol("HIMEM");
         memory[page] = 0; memory[page + 1] = 0x80;
         memory[himem] = 0; memory[himem + 1] = 0xf7;
-        snprintf((char *)memory + 0x7d00, 128, "\"%s\"\n", paths[i]); cpu.iy = 0x7d00;
+        snprintf((char *)memory + 0xf200, 128, "\"%s\"\n", paths[i]); cpu.iy = 0xf200;
         stop_pc = symbol("RUN0"); run();
         CHECK(!basic_error); CHECK(cpu.pc == stop_pc);
         CHECK(!strcmp(opened_name, paths[i])); CHECK(file_pos == file_size);
@@ -387,8 +455,8 @@ static void test_escape(void) {
     reset("INPUT_RAW"); fail_call = 7; run();
     CHECK(!memory[symbol("RAW_INPUT")]); invoke("LTRAP"); CHECK(input_reads == 0);
     fail_call = -1; keys[0] = 'z'; key_size = 1; invoke("OSRDCH"); CHECK(cpu.a == 'z');
-    reset("OSINIT"); set_bc(8); set_de(0x7d00);
-    strcpy((char *)memory + 0x7d00, "test.bbc"); run();
+    reset("OSINIT"); set_bc(8); set_de(0xf200);
+    strcpy((char *)memory + 0xf200, "test.bbc"); run();
     CHECK(!cpu.zf); CHECK(memory[symbol("RAW_INPUT")] == 1);
     CHECK(!memcmp(memory + symbol("ACCS"), "test.bbc", 8));
 }
@@ -397,6 +465,7 @@ int main(int argc, char **argv) {
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
     FILE *fp = fopen(argv[1], "rb"); assert(fp);
     size_t length = fread(image + 0x4000, 1, 0xc000, fp); fclose(fp); assert(length > 0);
+    CHECK(symbol("__tail") <= symbol("USER"));
     test_errors();
     test_loads();
     test_saves();
@@ -404,6 +473,7 @@ int main(int argc, char **argv) {
     test_openup();
     test_eof();
     test_ext();
+    test_close_all();
     test_chain_names();
     test_bundled_loads();
     test_escape();

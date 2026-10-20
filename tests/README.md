@@ -29,3 +29,12 @@ input is not polled; GET continues to read it as a byte stream.
 OS failures reported by this port use BASIC `ERR = 128 + Zeal OS error code`
 and the message `Zeal OS error`. `OPENIN`/`OPENOUT`/`OPENUP` retain their BASIC
 contract of returning channel zero when opening fails.
+
+File-interface checks exercise OPENOUT truncation and overwrite behavior,
+OPENUP read/write access, non-consuming EOF checks, and 32-bit EXT sizes through
+the evaluator as well as the adapters. The syscall model enforces access flags
+and seek positions. Close-all tests cover multiple owned descriptors, inherited
+standard streams and other caller handles, failed opens, temporary load/save
+handles, repeated cleanup, close failures and retry, program END, error unwinding,
+and exit. Cleanup attempts all owned closes, retains failed handles for retry,
+and preserves the original BASIC error during best-effort error cleanup.

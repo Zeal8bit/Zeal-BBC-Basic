@@ -9,6 +9,7 @@
         PUBLIC	OSLOAD
         PUBLIC	OSOPEN
         PUBLIC	OSSHUT
+        PUBLIC	OSCLEAN
         PUBLIC	OSBGET
         PUBLIC	OSBPUT
         PUBLIC	OSSTAT
@@ -83,6 +84,11 @@ OSINIT:
         or 1
 SKIPLOAD:
         push af                 ; preserve the auto-run decision
+        ld hl, FILE_CHANNELS
+        ld de, FILE_CHANNELS + 1
+        ld bc, 127
+        ld (hl), 0
+        ldir                    ; initialize this interpreter's ownership table
         call INPUT_RAW
         pop af
         ld de, 0xF800
@@ -228,7 +234,6 @@ OSLINE:
 ;           Carry clear for OPENOUT, set with A=0 for OPENIN,
 ;           set with A=1 for OPENUP (as supplied by the evaluator).
 ;  Outputs: A = file channel (=0 if cannot open)
-;           DE = file FCB
 ; Destroys: A,B,C,D,E,H,L,F
 ;
 OSOPEN:
@@ -243,7 +248,7 @@ OSOPEN:
         jr z, OSOPEN_READ
         ld h, O_RDWR
 OSOPEN_READ:
-        OPEN()
+        call FILE_OPEN
         ; Check for error, if positive, return
         or a
         ret p
@@ -251,6 +256,47 @@ OSOPEN_ERROR:
         xor a
         ret
 
+
+; Every file opened by this adapter, including temporary load/save handles,
+; is owned until CLOSE succeeds. Zeal descriptors are shared with the caller;
+; never infer ownership merely from a descriptor being open in the OS.
+FILE_OPEN:
+        OPEN()
+        or a
+        ret m
+        push af
+        ld e, a
+        call CHANNEL_ENTRY
+        ld (hl), 1
+        pop af
+        or a
+        ret nz
+        ; Native descriptor zero cannot be represented as a BASIC channel.
+        ; It was just allocated by us, so close it rather than leak it.
+        ld h, 0
+        call FILE_CLOSE
+        ld a, -ERR_INVALID_FILEDEV
+        ret
+
+FILE_CLOSE:
+        push hl
+        CLOSE()
+        pop hl
+        or a
+        ret nz                  ; retain ownership so failed closes can be retried
+        push af
+        ld e, h
+        call CHANNEL_ENTRY
+        ld (hl), 0
+        pop af
+        ret
+
+; E is a nonnegative descriptor (0..127, the successful OPEN return range).
+CHANNEL_ENTRY:
+        ld d, 0
+        ld hl, FILE_CHANNELS
+        add hl, de
+        ret
 
 ;OSSTAT - Read file status.
 ;   Inputs: E = file channel
@@ -368,7 +414,7 @@ OSLOAD:
         ld b, h
         ld c, l
         ld h, O_RDONLY
-        OPEN()
+        call FILE_OPEN
         pop bc
         pop de
         or a
@@ -396,7 +442,7 @@ OSLOAD:
         jr c, LOAD_FITS
         jr z, LOAD_FITS
 LOAD_NO_ROOM:
-        CLOSE()
+        call FILE_CLOSE
         or a
         jp nz, SHOW_ERROR
         or a                    ; carry clear: LOAD0 reports "No room"
@@ -417,7 +463,7 @@ LOAD_FITS:
         ld (FILE_REMAIN), bc
         ld l, 0                 ; Zeal read syscall
         call FILE_TRANSFER
-        CLOSE()
+        call FILE_CLOSE
         or a
         jp nz, SHOW_ERROR
         scf
@@ -489,7 +535,7 @@ OSSAVE:
         ld b, h
         ld c, l
         ld h, O_WRONLY | O_CREAT | O_TRUNC
-        OPEN()
+        call FILE_OPEN
         pop bc
         pop de
         ; Check for errors
@@ -499,14 +545,14 @@ OSSAVE:
         ld (FILE_REMAIN), bc
         ld l, 1                 ; Zeal write syscall
         call FILE_TRANSFER
-        CLOSE()
+        call FILE_CLOSE
         or a
         jp nz, SHOW_ERROR
         ret
 CLOSE_ERROR:
         ; Keep the original failure even when cleanup fails too.
         push af
-        CLOSE()
+        call FILE_CLOSE
         pop af
         jr SHOW_ERROR
 TRANSFER_ERROR:
@@ -522,21 +568,65 @@ SHOW_ERROR:
         DEFB 0
 
 
-;OSSHUT - Close disk file(s).
-;   Inputs: E = file channel
-;           If E=0 all files are closed (except SPOOL)
-; Destroys: A,B,C,D,E,H,L,F
-;
+;OSSHUT - Close a BASIC-owned channel, or all owned channels if E=0.
+; Explicit closes report errors; error unwinding uses OSCLEAN directly.
 OSSHUT:
-    ld a, e
-    or a
-    ret z
-    ld h, a
-    CLOSE()
-    or a
-    jp nz, SHOW_ERROR
-    ret
+        ld a, e
+        or a
+        jr z, CLOSE_ALL
+        bit 7, e
+        jr nz, CHANNEL_ERROR
+        call CHANNEL_ENTRY
+        ld a, (hl)
+        or a
+        jr z, CHANNEL_ERROR
+        ld h, e
+        call FILE_CLOSE
+        or a
+        jp nz, SHOW_ERROR
+        ret
+CHANNEL_ERROR:
+        ld a, ERR_INVALID_FILEDEV
+        jp SHOW_ERROR
+CLOSE_ALL:
+        call OSCLEAN
+        or a
+        jp nz, SHOW_ERROR
+        ret
 
+; Best-effort cleanup: attempt every owned close and return the first error in
+; A, without raising a new BASIC error while another error is being reported.
+OSCLEAN:
+        xor a
+        ld (CLOSE_FAILURE), a
+        ld e, 0
+CLEAN_CHANNEL:
+        push de
+        call CHANNEL_ENTRY
+        ld a, (hl)
+        or a
+        jr z, CLEAN_NEXT
+        ld h, e
+        call FILE_CLOSE
+        or a
+        jr z, CLEAN_NEXT
+        ld b, a
+        ld a, (CLOSE_FAILURE)
+        or a
+        jr nz, CLEAN_NEXT
+        ld a, b
+        ld (CLOSE_FAILURE), a
+CLEAN_NEXT:
+        pop de
+        inc e
+        bit 7, e
+        jr z, CLEAN_CHANNEL
+        ld a, (CLOSE_FAILURE)
+        or a
+        ret
+
+FILE_CHANNELS: DEFS 128
+CLOSE_FAILURE: DEFB 0
 
 ;
 ;GETEXT - Find file size.
@@ -611,6 +701,8 @@ PROMPT:
 ;BYE - Stop interrupts and return to CP/M.
 ;
 BYE:
+        ld e, 0
+        call OSSHUT
         call INPUT_COOKED
         ld h, 0 ; Return value
         ei
