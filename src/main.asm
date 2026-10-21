@@ -17,6 +17,7 @@
         EXTERN	CHECK
         EXTERN	SEARCH
 ;
+        EXTERN D_RESET_SEQUENCE
         EXTERN	OSWRCH
         EXTERN	OSLINE
         EXTERN	OSINIT
@@ -1059,6 +1060,9 @@ EXTERR:	POP	HL
         LD	(ERRTXT),HL
         LD	SP,(HIMEM)
         LD	(ERR),A
+        PUSH AF
+        CALL D_RESET_SEQUENCE
+        POP AF
         CALL	SETLIN
         LD	(ERL),HL
         OR	A

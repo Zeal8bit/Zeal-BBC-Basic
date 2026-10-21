@@ -1,0 +1,13 @@
+10 REM Inspect all supported BBC mode mappings. Mode 7 is deferred.
+20 FOR M%=0 TO 6
+30 MODE M%
+40 PRINT "BBC mode ";M%
+50 IF M%=3 OR M%=6 THEN GOTO 100
+60 GCOL 0,1:MOVE 0,0:DRAW 1279,1023:MOVE 0,1023:DRAW 1279,0
+70 MOVE 120,120:PLOT 101,360,360
+80 PRINT "POINT at lower left = ";POINT(0,0)
+100 PRINT "Press a key for next mode"
+110 A$=GET$
+120 NEXT
+130 MODE 3
+140 END

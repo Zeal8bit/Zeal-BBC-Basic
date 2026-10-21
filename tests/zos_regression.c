@@ -2,6 +2,7 @@
  * CPU implementation is supplied by an unmodified Zeal-NativeEmulator checkout.
  */
 #include "hw/z80.h"
+#include "hw/zvb/default_font.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -9,7 +10,9 @@
 #include <string.h>
 
 static z80 cpu;
-static device_t ram;
+static device_t ram, video_io;
+static uint8_t video[0x20000], video_ports[256];
+static unsigned video_accesses;
 static uint8_t memory[65536], image[65536], file[65536];
 static const char *map_path;
 static uint32_t file_size, file_pos;
@@ -25,7 +28,7 @@ static unsigned stop_pc;
 static int follow_basic_error;
 static uint8_t keys[1024];
 static unsigned key_size, key_pos, keyboard_mode;
-static int inject_interrupt, interrupt_seen, escape_after_reads, input_reads;
+static int inject_interrupt, interrupt_seen, escape_after_reads, input_reads, interrupt_during_video;
 static int partial_release;
 static int file_exists;
 static uint8_t native_open[128], close_errors[128];
@@ -33,11 +36,29 @@ static unsigned close_attempts[128], first_descriptor, exited;
 static int mode_failure, stdin_limit, clobber_syscall_alternates;
 static void invoke(const char *entry);
 
-static uint8_t read_ram(device_t *dev, uint32_t address) { (void)dev; return memory[address & 65535]; }
-static void write_ram(device_t *dev, uint32_t address, uint8_t value) { (void)dev; memory[address & 65535] = value; }
+static uint8_t read_ram(device_t *dev, uint32_t address) {
+    (void)dev;
+    if (address >= 0x100000 && address < 0x120000) { video_accesses++; return video[address - 0x100000]; }
+    return memory[address & 65535];
+}
+static void write_ram(device_t *dev, uint32_t address, uint8_t value) {
+    (void)dev;
+    if (address >= 0x100000 && address < 0x120000) { video_accesses++; video[address - 0x100000] = value; return; }
+    memory[address & 65535] = value;
+}
+static uint8_t read_io(device_t *dev, uint32_t port) {
+    if ((port & 0xf0) == 0xf0) return cpu.mmu.pages[dev->io_region.upper_addr >> 6];
+    return video_ports[port];
+}
+static void write_io(device_t *dev, uint32_t port, uint8_t value) {
+    (void)dev;
+    if ((port & 0xf0) == 0xf0) { cpu.mmu.pages[port & 3] = value; }
+    else video_ports[port] = value;
+}
 int mmu_init(mmu_t *mmu) {
     memset(mmu, 0, sizeof(*mmu));
     for (int i = 0; i < 4; ++i) { mmu->pages[i] = i; mmu->vpages[i].dev = &ram; }
+    for (int i = 0; i < 256; ++i) mmu->io_mapping[i].dev = &video_io;
     return 0;
 }
 void vtimer_tick(uint64_t elapsed) { (void)elapsed; }
@@ -73,6 +94,9 @@ static void reset(const char *entry) {
     memcpy(memory, image, sizeof(memory)); z80_init(&cpu);
     cpu.pc = symbol(entry); cpu.sp = 0xf600;
     memory[cpu.sp] = 0; memory[cpu.sp + 1] = 0x30;
+    memset(video, 0, sizeof(video)); memset(video_ports, 0, sizeof(video_ports));
+    memcpy(video + 0x3000, default_font, DEFAULT_FONT_SIZE);
+    video_ports[0x82] = 1; video_accesses = 0;
     fail_call = -1; failure = 19; close_failure = 0; short_limit = -1;
     opened = closed = transfers = basic_error = invalid_buffer = 0;
     fail_transfer = premature_eof = 0;
@@ -82,7 +106,7 @@ static void reset(const char *entry) {
     follow_basic_error = 0;
     key_size = key_pos = keyboard_mode = 0;
     inject_interrupt = interrupt_seen = escape_after_reads = input_reads = 0;
-    partial_release = 0;
+    partial_release = 0; interrupt_during_video = 0;
     file_exists = 1; last_flags = 2;
     memset(native_open, 0, sizeof(native_open)); native_open[0] = native_open[1] = 1;
     memset(close_errors, 0, sizeof(close_errors)); memset(close_attempts, 0, sizeof(close_attempts));
@@ -90,9 +114,9 @@ static void reset(const char *entry) {
     mode_failure = 0; stdin_limit = -1; clobber_syscall_alternates = 0;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0xf100, "test.bbc");
-    memory[symbol("PAGE") + 1] = 0x80;
-    memory[symbol("TOP")] = 3; memory[symbol("TOP") + 1] = 0x80;
-    set_hl(0xf100); set_de(0x8000); set_bc(16);
+    memory[symbol("PAGE")] = symbol("USER"); memory[symbol("PAGE") + 1] = symbol("USER") >> 8;
+    memory[symbol("TOP")] = symbol("USER") + 3; memory[symbol("TOP") + 1] = (symbol("USER") + 3) >> 8;
+    set_hl(0xf100); set_de(symbol("USER")); set_bc(16);
 }
 static void syscall(void) {
     unsigned call = cpu.l, address = cpu.d << 8 | cpu.e, count = cpu.b << 8 | cpu.c;
@@ -171,6 +195,9 @@ static void syscall(void) {
         set_bc(file_pos >> 16); set_de(file_pos & 65535); break;
     }
     case 7:
+        if (cpu.h == 0 && cpu.c == 2) {
+            memory[address] = cursor_x; memory[address + 1] = cursor_y; break;
+        }
         if (cpu.h == 0 && cpu.c == 4) {
             cursor_x = cpu.d; cursor_y = cpu.e; cursor_sets++;
             set_bc(0xdead); /* Driver scratch registers must not alter PRINT. */
@@ -191,16 +218,19 @@ static void syscall(void) {
 }
 static void run(void) {
     unsigned error_entry = symbol("EXTERR");
-    for (unsigned step = 0; step < 2000000; ++step) {
+    for (unsigned step = 0; step < 30000000; ++step) {
         if (cpu.pc == 0x3000 || (stop_pc && cpu.pc == stop_pc)) return;
         if (cpu.pc == error_entry && !follow_basic_error) { basic_error = cpu.a; return; }
+        if (interrupt_during_video && cpu.mmu.pages[2] >= 0x40 && cpu.iff1) {
+            interrupt_during_video = 0; inject_interrupt = 1;
+        }
         if (inject_interrupt && cpu.iff1) {
             inject_interrupt = 0; z80_gen_int(&cpu, cpu.interrupt_mode == 2 ? 2 : 0xff);
         }
         if (cpu.pc == 0x2000) interrupt_seen++;
         if (cpu.pc == 8) syscall(); else z80_step(&cpu);
     }
-    fprintf(stderr, "Instruction limit at %04x\n", cpu.pc); exit(1);
+    fprintf(stderr, "Instruction limit at %04x stop=%04x sp=%04x input=%u/%u\n", cpu.pc,stop_pc,cpu.sp,key_pos,key_size); exit(1);
 }
 #define CHECK(condition) do { checks++; if (!(condition)) { \
     fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); exit(1); } } while (0)
@@ -223,16 +253,16 @@ static void test_errors(void) {
     reset("OSBPUT"); cpu.e = 2; short_limit = 0; run(); CHECK(basic_error == (128 | 1));
 }
 static void test_loads(void) {
-    const unsigned lengths[] = {0, 1, 8191, 8192, 8193, 13914, 16384, 16385, 28000};
+    const unsigned lengths[] = {0, 1, 8191, 8192, 8193, 13914, 16384, 16385, 18000};
     for (unsigned i = 0; i < sizeof(lengths) / sizeof(*lengths); ++i) {
         reset("OSLOAD"); file_size = lengths[i]; set_bc(0x7000); run();
         CHECK(!basic_error); CHECK(cpu.cf); CHECK(closed == 1);
         CHECK(file_pos == file_size); CHECK(!invalid_buffer);
-        CHECK(!memcmp(memory + 0x8000, file, file_size));
+        CHECK(!memcmp(memory + symbol("USER"), file, file_size));
     }
-    reset("OSLOAD"); file_size = 17; memory[0x8000] = 0xaa; run();
+    reset("OSLOAD"); file_size = 17; memory[symbol("USER")] = 0xaa; run();
     CHECK(!cpu.cf); CHECK(!basic_error); CHECK(transfers == 0);
-    CHECK(memory[0x8000] == 0xaa); CHECK(closed == 1);
+    CHECK(memory[symbol("USER")] == 0xaa); CHECK(closed == 1);
     reset("OSLOAD"); file_size = 65536; set_bc(0x7000); run();
     CHECK(!cpu.cf); CHECK(!basic_error); CHECK(transfers == 0); CHECK(closed == 1);
     reset("OSLOAD"); file_size = 10000; set_de(0xbffd); set_bc(10000); short_limit = 257; run();
@@ -257,23 +287,23 @@ static void test_validation(void) {
         strcpy((char *)memory + symbol("ACCS"), "test.bbc");
         stop_pc = i < 9 ? symbol("NEW") : 0x3000; run();
         CHECK(!basic_error); CHECK(cpu.pc == stop_pc);
-        if (i < 9) CHECK(memory[0x8000] == 0);
+        if (i < 9) CHECK(memory[symbol("USER")] == 0);
         else CHECK(memory[symbol("TOP")] == (i == 9 ? 7 : 3));
     }
     reset("LOAD0"); strcpy((char *)memory + symbol("ACCS"), "test.bbc");
     file_size = 100; fail_transfer = 2; short_limit = 4;
     memory[symbol("ERRTRP")] = 123; run();
-    CHECK(basic_error == (128 | 19)); CHECK(memory[0x8000] == 0);
+    CHECK(basic_error == (128 | 19)); CHECK(memory[symbol("USER")] == 0);
     CHECK(memory[symbol("ERRTRP")] == 0); CHECK(memory[symbol("TOP")] == 3);
 }
 static void test_saves(void) {
-    const unsigned lengths[] = {0, 1, 16383, 16384, 16385, 28000};
+    const unsigned lengths[] = {0, 1, 16383, 16384, 16385, 18000};
     for (unsigned i = 0; i < sizeof(lengths) / sizeof(*lengths); ++i) {
         reset("OSSAVE"); unsigned length = lengths[i]; set_bc(length);
-        for (unsigned j = 0; j < length; ++j) memory[0x8000 + j] = (uint8_t)(j * 7);
+        for (unsigned j = 0; j < length; ++j) memory[symbol("USER") + j] = (uint8_t)(j * 7);
         run();
         CHECK(!basic_error); CHECK(!invalid_buffer); CHECK(closed == 1);
-        CHECK(file_size == length); CHECK(!memcmp(file, memory + 0x8000, length));
+        CHECK(file_size == length); CHECK(!memcmp(file, memory + symbol("USER"), length));
     }
     reset("OSSAVE"); set_de(0xbffd); set_bc(10000); short_limit = 257; run();
     CHECK(!basic_error); CHECK(!invalid_buffer); CHECK(closed == 1);
@@ -362,11 +392,11 @@ static void open_more(unsigned descriptor) {
 }
 static void program_error_location(void) {
     unsigned page = symbol("PAGE"), himem = symbol("HIMEM"), errlin = symbol("ERRLIN");
-    memory[page] = 0; memory[page + 1] = 0x80;
+    memory[page] = symbol("USER"); memory[page + 1] = symbol("USER") >> 8;
     memory[himem] = 0; memory[himem + 1] = 0xf7;
-    memory[errlin] = 3; memory[errlin + 1] = 0x80;
+    memory[errlin] = symbol("USER") + 3; memory[errlin + 1] = (symbol("USER") + 3) >> 8;
     const uint8_t program[] = {5, 10, 0, 0xe0, 10, 0, 0xff, 0xff};
-    memcpy(memory + 0x8000, program, sizeof(program));
+    memcpy(memory + symbol("USER"), program, sizeof(program));
 }
 static void test_close_all(void) {
     reset("OPENIN"); native_open[7] = 1; open_basic(); open_more(5); open_more(127);
@@ -412,7 +442,7 @@ static void test_chain_names(void) {
         memset(memory + accs, 'X', 256);
         strcpy((char *)memory + 0xf200, "\"test.bbc\"\n"); cpu.iy = 0xf200;
         memory[himem] = 0; memory[himem + 1] = 0xf7;
-        memory[page] = 0; memory[page + 1] = 0x80;
+        memory[page] = symbol("USER"); memory[page + 1] = symbol("USER") >> 8;
         file_size = 3; file[0] = 0; file[1] = file[2] = 0xff;
         stop_pc = symbol("RUN0"); run();
         CHECK(!basic_error); CHECK(!strcmp(opened_name, "test.bbc"));
@@ -426,13 +456,13 @@ static void test_bundled_loads(void) {
         reset("CHAIN"); FILE *fp = fopen(paths[i], "rb"); assert(fp);
         file_size = fread(file, 1, sizeof(file), fp); fclose(fp);
         unsigned page = symbol("PAGE"), himem = symbol("HIMEM");
-        memory[page] = 0; memory[page + 1] = 0x80;
+        memory[page] = symbol("USER"); memory[page + 1] = symbol("USER") >> 8;
         memory[himem] = 0; memory[himem + 1] = 0xf7;
         snprintf((char *)memory + 0xf200, 128, "\"%s\"\n", paths[i]); cpu.iy = 0xf200;
         stop_pc = symbol("RUN0"); run();
         CHECK(!basic_error); CHECK(cpu.pc == stop_pc);
         CHECK(!strcmp(opened_name, paths[i])); CHECK(file_pos == file_size);
-        CHECK(!memcmp(memory + 0x8000, file, file_size));
+        CHECK(!memcmp(memory + symbol("USER"), file, file_size));
     }
 }
 static void prepare_keyboard(void) {
@@ -501,11 +531,11 @@ static void test_escape(void) {
     /* Real BASIC GOTO loop must reach Escape without calling GET/INPUT. */
     reset("RUN0"); prepare_keyboard();
     unsigned page = symbol("PAGE"), himem = symbol("HIMEM");
-    memory[page] = 0; memory[page + 1] = 0x80;
+    memory[page] = symbol("USER"); memory[page + 1] = symbol("USER") >> 8;
     memory[himem] = 0; memory[himem + 1] = 0xf7;
     const uint8_t loop[] = {9, 10, 0, 0xe5, 0x8d, 0x54, 0x4a, 0x40, 10, 0, 0xff, 0xff};
-    memcpy(memory + 0x8000, loop, sizeof(loop));
-    unsigned top = symbol("TOP"); memory[top] = 12; memory[top + 1] = 0x80;
+    memcpy(memory + symbol("USER"), loop, sizeof(loop));
+    unsigned top = symbol("TOP"); memory[top] = symbol("USER") + 12; memory[top + 1] = (symbol("USER") + 12) >> 8;
     escape_after_reads = 3; stop_pc = symbol("ESCAPE"); run();
     CHECK(cpu.pc == stop_pc); CHECK(input_reads == 3);
     /* Continue the real error path back to the prompt, rather than intercept it. */
@@ -609,7 +639,7 @@ static void test_commands(void) {
     reset("RUN0"); program_error_location();
     const uint8_t commented[] = {12,10,0,'*','|','c','o','m','m','e','n',10,
         5,20,0,0xe0,10,0,255,255};
-    memcpy(memory + 0x8000, commented, sizeof(commented));
+    memcpy(memory + symbol("USER"), commented, sizeof(commented));
     stop_pc = symbol("WARM"); run();
     CHECK(!basic_error); CHECK(!exited); CHECK(cpu.pc == stop_pc);
     reset("CLI"); strcpy((char *)memory + 0xf200, "\"\":\340\n"); cpu.iy = 0xf200;
@@ -691,12 +721,12 @@ static void test_hamurabi_source(void) {
     CHECK((memory[vars+4] | memory[vars+5] << 8) == 1005);
     CHECK((memory[vars+76] | memory[vars+77] << 8) == 2700);
     CHECK(memory[vars+12] == 0 && memory[vars+13] == 0);
-    reset("XEQ"); memcpy(memory + 0x8000, actual, size);
+    reset("XEQ"); memcpy(memory + symbol("USER"), actual, size);
     stop_pc = symbol("exec:XEQ0"); unsigned stack = cpu.sp;
     for (unsigned attempt = 0; attempt < 20; ++attempt) {
-        cpu.pc = symbol("XEQ"); cpu.iy = 0x8000 + retry + 3; run();
+        cpu.pc = symbol("XEQ"); cpu.iy = symbol("USER") + retry + 3; run();
         CHECK(!basic_error); CHECK(cpu.sp == stack);
-        CHECK(cpu.iy == 0x8000 + example_line(actual, 440));
+        CHECK(cpu.iy == symbol("USER") + example_line(actual, 440));
     }
 
 }
@@ -713,8 +743,8 @@ static void test_blackjack_procedure(void) {
     CHECK(program[definition + 3] == 0xdd && program[definition + 4] == 0xf2); /* DEF PROC */
     CHECK(!memcmp(program + definition + 5, "whoone\n", 7));
     reset("XEQ"); program_error_location();
-    memcpy(memory + 0x8000, program, size);
-    unsigned top = 0x8000 + size;
+    memcpy(memory + symbol("USER"), program, size);
+    unsigned top = symbol("USER") + size;
     memory[symbol("TOP")] = top; memory[symbol("TOP") + 1] = top >> 8;
     invoke("CLEAR");
     memcpy(memory + 0xf200, init, init_size); memory[0xf200 + init_size] = 10;
@@ -741,12 +771,193 @@ static void test_irq_vectors(void) {
         invoke("BYE"); CHECK(exited); CHECK(cpu.i == 0x21);
     }
 }
+static void display_byte(unsigned byte) {
+    cpu.a = byte; invoke("OSWRCH"); CHECK(!basic_error);
+    CHECK(cpu.mmu.pages[0] == 0 && cpu.mmu.pages[2] == 2);
+}
+static void plot(unsigned op, int x, int y) {
+    cpu.a = op; set_de((uint16_t)x); set_hl((uint16_t)y); invoke("G_PLOT"); CHECK(!basic_error);
+    CHECK(cpu.mmu.pages[0] == 0 && cpu.mmu.pages[2] == 2);
+}
+static int point(int x, int y) {
+    set_de((uint16_t)x); set_hl((uint16_t)y); invoke("G_POINT"); CHECK(!basic_error);
+    return (int16_t)(cpu.h << 8 | cpu.l);
+}
+static void vdu(const uint8_t *bytes, unsigned count) {
+    for (unsigned i=0;i<count;i++) display_byte(bytes[i]);
+}
+static void test_graphics_semantics(void) {
+    uint8_t statement[256];
+    unsigned size = tokenize_text("GCOL 0,2:MOVE 0,0:DRAW 80,80:A%=POINT(80,80):B%=POINT(-4,0):END", statement);
+    reset("D_MODE"); program_error_location(); cpu.a = 1; run(); CHECK(!basic_error);
+    memcpy(memory + 0xf200, statement, size); memory[0xf200+size] = 10;
+    cpu.iy = 0xf200; stop_pc = symbol("CLOOP"); invoke("XEQ");
+    CHECK(!basic_error);
+    CHECK(memory[symbol("STAVAR")+4] == 2);
+    CHECK(memory[symbol("STAVAR")+8] == 255 && memory[symbol("STAVAR")+11] == 255);
+    stop_pc = 0;
+    invoke("G_CLEAR"); CHECK(!basic_error);
+    cpu.a = 3; cpu.e = 1; invoke("G_COLOUR");
+    for (int i=0;i<2;i++) {
+        plot(4,40,40); plot(4,200,40); plot(85,120,200);
+        CHECK(point(120,80) == (i == 0 ? 1 : 0));
+        CHECK(point(120,240) == 0);
+    }
+    cpu.a = 0; cpu.e = 2; invoke("G_COLOUR");
+    const uint8_t window[] = {24,40,0,40,0,200,0,200,0}; vdu(window,sizeof(window));
+    plot(4,-32768,-32768); plot(101,32767,32767);
+    CHECK(point(120,120) == 2); CHECK(point(0,0) == -1);
+    CHECK(point(32767,32767) == -1); CHECK(point(-32768,-32768) == -1);
+    const uint8_t origin[] = {29,40,0,40,0}; vdu(origin,sizeof(origin));
+    CHECK(point(80,80) == 2);
+    display_byte(26);
+    const uint8_t wide_window[]={24,255,255,255,255,255,127,255,127};
+    vdu(wide_window,sizeof(wide_window)); CHECK(point(120,120)==2);
+    display_byte(26);
+    const uint8_t palette[] = {19,2,16,255,128,0}; vdu(palette,sizeof(palette));
+    CHECK(video[0xe04] == 0 && video[0xe05] == 0xfc);
+    CHECK(point(120,120) == 2);
+    /* POINT and stream plotting preserve the alternate arithmetic bank. */
+    prepare_keyboard();
+    const uint8_t vp[] = {25,69,160,0,160,0}; vdu(vp,sizeof(vp)); check_alternates();
+    CHECK(point(160,160) == 2); check_alternates();
+    cpu.iff1 = cpu.iff2 = true;
+    set_de(0); cpu.a=1; invoke("V_WRITE"); CHECK(cpu.iff1 && cpu.mmu.pages[0] == 0);
+    cpu.iff1 = cpu.iff2 = false;
+    set_de(0); invoke("V_READ"); CHECK(!cpu.iff1 && cpu.mmu.pages[0] == 0);
+    /* Every GCOL action reads the same stored logical pixel. */
+    const int expected[] = {1,3,0,3,1};
+    for (unsigned action=0;action<5;action++) {
+        cpu.a=0; cpu.e=2; invoke("G_COLOUR"); plot(69,400,400);
+        cpu.a=action; cpu.e=1; invoke("G_COLOUR"); plot(69,400,400);
+        CHECK(point(400,400) == expected[action]);
+    }
+    invoke("G_CLEAR"); cpu.a=0; cpu.e=1; invoke("G_COLOUR");
+    plot(4,80,80); plot(5,80,200); plot(4,200,80); plot(5,200,200);
+    plot(77,120,120); CHECK(point(120,120)==1); CHECK(point(40,120)==0);
+    invoke("G_CLEAR"); cpu.a=0; cpu.e=1; invoke("G_COLOUR");
+    plot(4,0,0); plot(5,80,80);
+    vdu(origin,sizeof(origin)); cpu.a=0; cpu.e=2; invoke("G_COLOUR");
+    plot(5,120,120); CHECK(point(40,40)==2);
+    display_byte(26); cpu.a=0; cpu.e=1; invoke("G_COLOUR");
+    plot(5,200,200); CHECK(point(120,120)==2);
+    /* Bitmap rows alternate in height. Scroll each row into its own cell
+     * rather than applying one fixed pixel offset to the whole window. */
+    const uint8_t bw[]={28,0,5,1,2}; vdu(bw,sizeof(bw));
+    for (unsigned x=0;x<16;x++) {
+        for (unsigned y=12;y<37;y++) video[0x10000+y*320+x]=(y<18 ? 1 : y<25 ? 2 : y<31 ? 3 : 0);
+    }
+    invoke("D_SCROLL"); CHECK(!basic_error);
+    CHECK(video[0x10000+12*320]==2);
+    CHECK(video[0x10000+18*320]==3);
+    CHECK(video[0x10000+24*320]==3);
+    CHECK(video[0x10000+25*320]==0);
+    reset("D_MODE"); cpu.a=3; run(); CHECK(!basic_error);
+    const uint8_t tw[] = {28,2,2,4,1}; vdu(tw,sizeof(tw));
+    display_byte('A'); display_byte('B'); display_byte('C'); display_byte('D');
+    CHECK(video[82] == 'A' && video[83] == 'B' && video[84] == 'C' && video[162] == 'D');
+    display_byte(10); CHECK(video[82] == 'D' && video[162] == ' ');
+    invoke("GETCSR"); CHECK(cpu.e == 0 && cpu.l == 1);
+    const uint8_t disabled[] = {21,'X',12,6,'Z'}; vdu(disabled,sizeof(disabled));
+    CHECK(video[162] == 'Z' && video[82] == 'D');
+    /* Software line input edits and echoes through this display. */
+    keys[0]='a'; keys[1]='b'; keys[2]=127; keys[3]='c'; keys[4]=10;
+    key_size=5; key_pos=0; set_hl(0xf100); invoke("OSLINE");
+    CHECK(!basic_error && !memcmp(memory+0xf100,"ac\n",3));
+    CHECK(keyboard_mode == 4);
+    reset("V_WRITE"); prepare_keyboard(); inject_interrupt = 0; interrupt_during_video = 1;
+    set_de(0); cpu.a=2; invoke("V_WRITE"); check_alternates();
+    CHECK(video[0x10000] == 2 && cpu.mmu.pages[2] == 2);
+}
+static void test_display(void) {
+    reset("D_MODE"); cpu.a = 1; run(); CHECK(!basic_error);
+    CHECK(video_ports[0x9c] == 3); CHECK(cpu.mmu.pages[0] == 0 && cpu.mmu.pages[2] == 2);
+    CHECK(memory[symbol("D_COLS")] == 40); CHECK(memory[symbol("D_ROWS")] == 32);
+    CHECK(video[0xe02] == 0 && video[0xe03] == 0xf8);
+    CHECK(point(0,0) == 0); CHECK(point(-1,0) == -1);
+    plot(69,40,40); CHECK(point(40,40) == 3);
+    plot(70,40,40); CHECK(point(40,40) == 0);
+    cpu.a = 3; cpu.e = 2; invoke("G_COLOUR"); CHECK(!basic_error);
+    plot(69,40,40); CHECK(point(40,40) == 2);
+    plot(69,40,40); CHECK(point(40,40) == 0);
+    cpu.a = 0; cpu.e = 1; invoke("G_COLOUR");
+    plot(4,0,0); plot(5,80,80);
+    CHECK(point(0,0) == 1); CHECK(point(80,80) == 1);
+    plot(0,4,4); CHECK((memory[symbol("G_X")] | memory[symbol("G_X")+1] << 8) == 84);
+    plot(4,0,0); plot(101,20,20); CHECK(point(8,8) == 1);
+    display_byte(31); display_byte(5); CHECK(memory[symbol("D_PENDING")] == 1);
+    display_byte(10); invoke("GETCSR"); CHECK(cpu.e == 5 && cpu.l == 10);
+    display_byte(17); display_byte(2); CHECK(memory[symbol("D_FG")] == 2);
+    display_byte(23); display_byte(224);
+    for (int i=0;i<8;i++) display_byte(255);
+    display_byte(224); CHECK(video[0x10000 + 62*320 + 40] == 2);
+    CHECK(memory[symbol("D_GH")] == 6);
+    CHECK(video[0x10000 + 68*320 + 40] == 0);
+    for (unsigned row=0;row<32;row++) {
+        const uint8_t cursor[]={31,0,row}; vdu(cursor,sizeof(cursor));
+        invoke("D_CELL"); CHECK(memory[symbol("D_GH")] == 6 || memory[symbol("D_GH")] == 7);
+    }
+    display_byte(25); display_byte(69); display_byte(160); display_byte(0); display_byte(160); display_byte(0);
+    CHECK(point(160,160) == 1);
+    display_byte(31); invoke("RESET"); CHECK(memory[symbol("D_PENDING")] == 0);
+    invoke("D_EXIT"); CHECK(!basic_error); CHECK(memory[symbol("D_ACTIVE")] == 0);
+    CHECK(!memcmp(video+0x3000,default_font,DEFAULT_FONT_SIZE));
+    const char *invalid_modes[]={"256\n","65536\n","-1\n"};
+    for (unsigned i=0;i<3;i++) {
+        reset("MODE"); strcpy((char*)memory+0xf200,invalid_modes[i]); cpu.iy=0xf200;
+        run(); CHECK(basic_error==255); CHECK(!video_accesses);
+    }
+    reset("D_MODE"); cpu.a = 7; run(); CHECK(basic_error == 255); CHECK(!video_accesses);
+    reset("D_MODE"); video_ports[0x82] = 0xff; cpu.a = 1; run();
+    CHECK(basic_error == 255); CHECK(!video_accesses);
+}
+static void test_graphics_examples(void) {
+    uint8_t program[8192];
+    unsigned size=tokenize_source("examples/graphics.bas",program);
+    reset("RUN0"); program_error_location();
+    /* Runtime workspace is not supplied by the loader and may contain junk. */
+    unsigned workspace=symbol("D_ORIGINAL_FONT"), end=symbol("FILE_CHANNELS");
+    memset(memory+workspace,0xa5,end-workspace);
+    program_error_location();
+    memcpy(memory+symbol("USER"),program,size);
+    unsigned top=symbol("USER")+size;
+    memory[symbol("TOP")]=top; memory[symbol("TOP")+1]=top>>8;
+    stop_pc=symbol("OSRDCH"); run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
+    CHECK(memory[symbol("D_MODE_NO")]==1); CHECK(point(100,700)==1);
+    const char *preview=getenv("BBC_GRAPHICS_PREVIEW");
+    if (preview) {
+        FILE *fp=fopen(preview,"wb"); assert(fp); fprintf(fp,"P6\n320 200\n255\n");
+        for (unsigned i=0;i<64000;i++) {
+            unsigned pal=video[0x10000+i]*2+0xe00;
+            unsigned colour=video[pal] | video[pal+1]<<8;
+            fputc(((colour>>11)&31)*255/31,fp);
+            fputc(((colour>>5)&63)*255/63,fp);
+            fputc((colour&31)*255/31,fp);
+        }
+        fclose(fp);
+    }
+    size=tokenize_source("examples/graphics-modes.bas",program);
+    reset("RUN0"); program_error_location(); memcpy(memory+symbol("USER"),program,size);
+    top=symbol("USER")+size; memory[symbol("TOP")]=top; memory[symbol("TOP")+1]=top>>8;
+    stop_pc=symbol("OSRDCH");
+    for (unsigned mode=0;mode<7;mode++) {
+        run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
+        CHECK(memory[symbol("D_MODE_NO")]==mode);
+        keys[key_size++]='x'; z80_step(&cpu);
+    }
+    stop_pc=symbol("WARM"); run(); CHECK(!basic_error);
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
+    video_io.io_region.read = read_io; video_io.io_region.write = write_io;
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
     FILE *fp = fopen(argv[1], "rb"); assert(fp);
     size_t length = fread(image + 0x4000, 1, 0xc000, fp); fclose(fp); assert(length > 0);
     CHECK(symbol("__tail") <= symbol("USER"));
+    CHECK((symbol("USER") & 255) == 0); CHECK((symbol("ACCS") & 255) == 0);
+    test_display();
+    test_graphics_semantics();
+    test_graphics_examples();
     test_errors();
     test_loads();
     test_validation();

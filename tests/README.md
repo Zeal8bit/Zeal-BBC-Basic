@@ -12,7 +12,8 @@ alongside this project. Supply `--emulator /path/to/Zeal-NativeEmulator` or
 `ZEAL_EMULATOR_PATH` for another location.
 
 These checks execute the assembled routines with the emulator's Z80 CPU core.
-The harness supplies flat RAM and deterministic Zeal syscall responses, including
+The harness supplies user RAM, banked ZVB video memory/registers, the emulator's
+standard font, and deterministic Zeal syscall responses, including
 short transfers, OS failures and virtual-page constraints. It does not replace
 end-to-end testing on Zeal OS or physical hardware.
 
@@ -90,3 +91,31 @@ INPUT, raw GET, numbered program entry/RUN, floating-point arithmetic during
 hardware interrupts, physical Escape from an infinite loop, SAVE, return to
 ZShell and filename auto-run after relaunch. These tests execute real kernel
 syscalls and the emulated PS/2 device; physical hardware remains unverified.
+
+
+## Display checks
+
+The normal regression runner also executes BBC command parsing, VDU sequences,
+all supported GCOL actions, signed/relative plotting, clipping/origin changes,
+POINT, triangles, rectangles, horizontal fills, custom characters, text windows,
+scrolling, raw line editing, and both graphics demonstration programs. Every
+bitmap text row must have a six- or seven-pixel cell height; glyphs must not
+write into adjacent cells. An interrupt is injected while video memory is mapped
+to verify arithmetic registers and restoration of the temporary page mapping.
+The font snapshot and other display scratch buffers are deliberately seeded
+with junk before the demo, proving they do not depend on zero-filled file data.
+
+The build runs `tests/check_layout.py` to verify that the image excludes runtime
+workspace, preserves required page alignment, leaves room below HIMEM, and keeps
+video helpers and interrupt wrappers below the temporary video mapping at &8000.
+The 3KB font backup and 800-byte triangle workspace occupy runtime RAM only.
+
+For a bitmap preview of the assembled graphics demonstration, set
+`BBC_GRAPHICS_PREVIEW=/absolute/path/preview.ppm` when running `tests/run.py`.
+The preview uses the actual indexed pixels and palette written by BASIC.
+
+The ZShell integration now also covers bitmap DRAW/GCOL/PLOT/POINT, INPUT and GET
+with display-owned echo, POS/VPOS in text mode, repeated mode changes, Escape in
+bitmap mode, and restoration of the shell's text display. Blocking raw reads are
+used while waiting for display input; nonblocking raw mode is restored before
+echo or drawing, so scrolling and Escape polling cannot block on a key.
