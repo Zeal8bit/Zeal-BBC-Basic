@@ -1,0 +1,19 @@
+10 REM Five fireworks: SIN, COS and coloured lines
+20 MODE 8
+30 FOR C%=1 TO 7:VDU 19,C%,C%,0,0,0:NEXT
+40 COLOUR 7:PRINT TAB(10,0);"POCKET FIREWORKS"
+50 PRINT TAB(4,14);"Press a key for each of 5 bursts";
+60 FOR B%=1 TO 5
+70 A$=GET$
+80 X%=240+RND(800):Y%=300+RND(400)
+90 GCOL 0,1+(B% MOD 7)
+100 FOR S%=0 TO 15
+110 A=2*PI*S%/16
+120 MOVE X%,Y%
+130 DRAW X%+180*COS(A),Y%+180*SIN(A)
+140 NEXT
+150 NEXT
+160 COLOUR 7:PRINT TAB(4,14);"Finale! Any key: back to text   ";
+170 A$=GET$
+180 MODE 3
+190 END

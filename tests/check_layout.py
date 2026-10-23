@@ -26,10 +26,12 @@ for name in ('ACCS', 'BUFFER', 'STAVAR', 'USER'):
     require(symbols[name] % 256 == 0, name + ' must be page aligned')
 require(symbols['INCREM'] < symbols['STAVAR'] + 256, 'cold-start variable purge is too short')
 regions = [('ACCS', 256), ('BUFFER', 256), ('STAVAR', 256),
-           ('D_ORIGINAL_FONT', 3072), ('G_SPANS', 800),
+           ('D_ORIGINAL_FONT', 3072), ('G_SPANS', 960),
            ('DISPLAY_SCRATCH', symbols['DISPLAY_SCRATCH_SIZE']), ('D_PARAMS', 9),
            ('D_GLYPH', 12), ('D_CURSOR', 2), ('FILE_CHANNELS', 128),
-           ('OPTVAL', 1), ('KEY_QUEUE', 16), ('KEY_EVENTS', 64), ('ZOS_BUFFER', symbols['ZOS_STAT_SIZE'])]
+           ('OPTVAL', 1), ('KEY_QUEUE', 16), ('KEY_EVENTS', 64), ('ZOS_BUFFER', symbols['ZOS_STAT_SIZE']),
+           ('TEXT_ACTIVE', 1), ('TEXT_CHANNEL', 1), ('TEXT_EOF', 1),
+           ('TEXT_SKIP_LF', 1), ('TEXT_PREVIOUS', 2), ('TEXT_SOURCE_LINE', 2)]
 previous_end = symbols['__tail']
 for name, length in regions:
     require(previous_end <= symbols[name], name + ' overlaps preceding region')

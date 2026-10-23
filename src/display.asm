@@ -1,13 +1,17 @@
 ; BBC VDU state and ZVB backend. Native startup output remains an OS stream.
 ; After MODE, this module owns cursor, windows, scrolling and input echo.
-        EXTERN D_CHAR, D_GX, D_GY, D_GW, D_GH, D_GROW
+        EXTERN D_CHAR, D_GX, D_GY
         EXTERN D_BITS, D_FILL, D_L, D_T, D_R, D_B
-        EXTERN D_CY, D_SCROLL_LINE, D_SCROLL_BOUNDARY, D_SCROLL_SOURCE_END, D_SCROLL_H
+        EXTERN D_CY, D_SCROLL_H
         EXTERN D_SCROLL_DEST
+        EXTERN D_MODE, D_MODE_NO, D_MASK, D_COLS, D_ROWS
+        EXTERN Z_KIND, Z_MAX_X, Z_MAX_Y, Z_PALETTE, Z_NORMALIZE_COLOUR, Z_NATIVE_STATE
+        EXTERN Z_PALETTE_ADDRESS, Z_TEXT_CELL, Z_TEXT_COLOURS, Z_BBC_COLOUR, Z_TILE_FONT
+        PUBLIC D_SAVE, D_WINDOWS, D_DEFAULT_COLOURS, D_LOAD_GLYPH, D_PAL_WORD
         INCLUDE "zos_syscall.asm"
         INCLUDE "zos_video.asm"
-        PUBLIC D_BYTE, D_CLEAR, D_SETCURSOR, D_GETCURSOR, D_MODE, D_COLOUR
-        PUBLIC D_BITMAP, D_ACTIVE, D_MASK, D_ERROR, D_UNSUPPORTED
+        PUBLIC D_BYTE, D_CLEAR, D_SETCURSOR, D_GETCURSOR, D_COLOUR
+        PUBLIC D_BITMAP, D_ACTIVE, D_X, D_FG, D_BG, D_ERROR, D_UNSUPPORTED
         EXTERN V_READ, V_WRITE, V_SPAN, D_VREAD, D_VWRITE
         EXTERN V_ADDRESS, V_TEXT_ADDRESS
         PUBLIC D_RESET_SEQUENCE, D_EXIT, D_FILL_RECT
@@ -16,11 +20,6 @@
         EXTERN G_X, G_Y, G_ACTION, G_FG, G_BG
         EXTERN G_TRANSFORM, G_TEXT_PIXEL, G_ABORT
 D_ACTIVE: defb 0
-D_MODE_NO: defb 255
-; Four contiguous fields copied from a D_MODES descriptor.
-D_MASK: defb 15
-D_COLS: defb 80
-D_ROWS: defb 40
 D_BITMAP: defb 0
 D_X: defb 0
 D_Y: defb 0
@@ -147,15 +146,20 @@ D_DISABLE:
         ret
 D_VCOLOUR:
         ld a,(D_PARAMS)
+        ld e,a
+        ld d,0
+        call Z_NORMALIZE_COLOUR
         jp D_COLOUR
 D_VGCOL:
         ld a,(D_PARAMS+1)
         ld e,a
+        ld d,0
+        call Z_NORMALIZE_COLOUR
         ld a,(D_PARAMS)
         jp G_COLOUR
 D_VMODE:
         ld a,(D_PARAMS)
-        jr D_MODE
+        jp D_MODE
 D_VPLOT:
         ld de,(D_PARAMS+1)
         ld hl,(D_PARAMS+3)
@@ -196,50 +200,6 @@ D_SAVE_FONT:
         ld a,1
         ld (D_SAVED),a
         ret
-D_MODE:
-        cp 7
-        jp nc,D_UNSUPPORTED
-        push af
-        call D_SAVE
-        pop af
-        ld (D_MODE_NO),a
-        ld l,a
-        ld h,0
-        add hl,hl
-        add hl,hl
-        ld de,D_MODES
-        add hl,de
-        ld de,D_MASK
-        ld bc,4
-        ldir                   ; mask, columns, rows, bitmap flag
-        ld a,(D_BITMAP)
-        ld b,a
-        add a,a
-        add a,b                ; ZVB mode 3 for bitmap, 0 for native text
-D_MODE_SET:
-        out (0x9c),a
-        xor a
-        out (0x8e),a
-        out (0xa6),a          ; no hardware cursor; software owns layout
-        out (0xa3),a
-        out (0xa4),a
-        ld a,0x80
-        out (0x9d),a
-        ld a,1
-        ld (D_ACTIVE),a
-        call D_RESET_SEQUENCE
-        call D_WINDOWS
-        call G_RESET
-        call D_DEFAULT_COLOURS
-        jp D_CLEAR
-D_MODES:
-        defb 1,80,32,1
-        defb 3,40,32,1
-        defb 15,20,32,1
-        defb 1,80,25,0
-        defb 1,40,32,1
-        defb 3,20,32,1
-        defb 1,40,25,0
 D_DEFAULT_COLOURS:
         call D_TAKE_TEXT
         xor a
@@ -249,80 +209,32 @@ D_DEFAULT_COLOURS:
         ld a,(D_MASK)
         ld (G_FG),a
         ld (D_FG),a
-        ld de,0x0e00
-        ld b,16
-D_PAL_LOOP:
-        ld a,e
-        srl a                  ; logical index; upper eight repeat the same RGB
-        call D_BBC_COLOUR
-        call D_PAL_WORD
-        inc de
-        djnz D_PAL_LOOP
-        ; BBC default logical palettes: 2 colours black/white; 4 colours
-        ; black/red/yellow/white; 16 colours use BBC physical colour numbers.
-        ld a,(D_MASK)
-        cp 1
-        jr nz,D_PAL_FOUR
-        ld hl,0xffff
-        ld de,0x0e02
-        jr D_PAL_WORD
-D_PAL_FOUR:
-        cp 3
-        ret nz
-        ld hl,0xf800
-        ld de,0x0e02
-        call D_PAL_WORD
-        ld hl,0xffe0
-        ld de,0x0e04
-        call D_PAL_WORD
-        ld hl,0xffff
-        ld de,0x0e06
+        jp Z_PALETTE
 D_PAL_WORD:
         ld a,l
         call D_VWRITE
         inc de
         ld a,h
         jp D_VWRITE
-; BBC physical colour bits are red, green, blue. Return RGB565 in HL,
-; preserving BC/DE so palette initialization and VDU 19 share this conversion.
-D_BBC_COLOUR:
-        ld hl,0
-        rrca
-        jr nc,D_BBC_GREEN
-        ld h,0xf8
-D_BBC_GREEN:
-        rrca
-        jr nc,D_BBC_BLUE
-        ld l,0xe0
-        push af
-        ld a,h
-        or 7
-        ld h,a
-        pop af
-D_BBC_BLUE:
-        rrca
-        ret nc
-        ld a,l
-        or 31
-        ld l,a
-        ret
 D_PALETTE:
         call D_TAKE_TEXT
         ld a,(D_PARAMS)
         ld b,a
+        ld a,(Z_KIND)
+        or a
+        jr nz,D_PALETTE_VALID
         ld a,(D_MASK)
         cp b
         jp c,D_ERROR
+D_PALETTE_VALID:
         ld a,b
-        add a,a
-        ld e,a
-        ld d,0x0e
+        call Z_PALETTE_ADDRESS
         ld a,(D_PARAMS+1)
         cp 16
         jr z,D_RGB
         cp 8
         jp nc,D_UNSUPPORTED    ; flashing physical colours deferred
-        call D_BBC_COLOUR
+        call Z_BBC_COLOUR
         jr D_PAL_WORD
 D_RGB:
         ; RGB888 -> RGB565, BBC extended VDU 19 logical,16,r,g,b.
@@ -353,16 +265,18 @@ D_RGB:
         ld l,a
         jp D_PAL_WORD
 D_COLOUR:
-        ld e,a
         ld a,(D_MASK)
         and e
-        bit 7,e
+        bit 0,d
         jr nz,D_COLOUR_BG
         ld (D_FG),a
         jr D_SET_OS_COLOURS
 D_COLOUR_BG:
         ld (D_BG),a
 D_SET_OS_COLOURS:
+        ld a,(Z_KIND)
+        cp 2
+        jp nc,Z_TEXT_COLOURS
         ld a,(D_ACTIVE)
         or a
         ret nz
@@ -576,11 +490,18 @@ D_BACK_ROW:
         ld (D_X),a
         jr D_UP
 D_GRAPH_STEP:
-        call D_CHAR_WIDTH
-        add a,a
-        add a,a
-        ld e,a
-        ld d,0
+        ld de,32
+        ld a,(D_MODE_NO)
+        cp 9
+        ret nz
+        ld e,40
+        ret
+D_GRAPH_Y_STEP:
+        ld de,64
+        ld a,(D_MODE_NO)
+        cp 9
+        ret nz
+        ld e,52
         ret
 D_FORWARD:
         ld a,(D_GRAPH_TEXT)
@@ -611,8 +532,8 @@ D_UP:
         ld a,(D_GRAPH_TEXT)
         or a
         jr z,D_UP_TEXT
+        call D_GRAPH_Y_STEP
         ld hl,(G_Y)
-        ld de,32
         add hl,de
         ld (G_Y),hl
         ret
@@ -633,9 +554,10 @@ D_DOWN:
         ld a,(D_GRAPH_TEXT)
         or a
         jr z,D_DOWN_TEXT
+        call D_GRAPH_Y_STEP
         ld hl,(G_Y)
-        ld de,-32
-        add hl,de
+        or a
+        sbc hl,de
         ld (G_Y),hl
         ret
 D_DOWN_TEXT:
@@ -658,8 +580,7 @@ D_DELETE:
         ld a,32
         call D_PRINT
         jp D_BACK
-; Calculate cell origin and dimensions for current cursor. BBC bitmap modes
-; have 32 rows in 200 pixels; row boundaries alternate between 6 and 7 pixels.
+; Calculate native text-map addresses or fixed 8x12 bitmap character cells.
 D_CELL:
         ld a,(D_BITMAP)
         or a
@@ -672,63 +593,27 @@ D_CELL:
         ld d,0
         ex de,hl
         jp V_TEXT_ADDRESS
-D_CHAR_WIDTH:
-        ld a,(D_COLS)
-        ld b,4
-        cp 80
-        jr z,D_CHAR_WIDTH_DONE
-        ld b,8
-        cp 40
-        jr z,D_CHAR_WIDTH_DONE
-        ld b,16
-D_CHAR_WIDTH_DONE:
-        ld a,b
-        ld (D_GW),a
-        ret
 D_BITMAP_CELL:
-        call D_CHAR_WIDTH
         ld a,(D_X)
         ld l,a
         ld h,0
-        ld c,b
-D_CELL_MUL:
-        srl c
-        jr z,D_CELL_X
         add hl,hl
-        jr D_CELL_MUL
-D_CELL_X:
+        add hl,hl
+        add hl,hl
         ld (D_GX),hl
         ld a,(D_Y)
         call D_ROW_Y
         ld (D_GY),hl
-        push hl
-        ld a,(D_Y)
-        inc a
-        call D_ROW_Y
-        pop de
-        or a
-        sbc hl,de
-        ld a,l
-        ld (D_GH),a
         ret
 D_ROW_Y:
-        ; row*25 = row*(16+8+1)
         ld h,0
         ld l,a
-        add hl,hl
         add hl,hl
         add hl,hl
         ld d,h
         ld e,l
         add hl,hl
         add hl,de
-        ld e,a
-        ld d,0
-        add hl,de
-        srl h
-        rr l
-        srl h
-        rr l
         ret
 D_PRINT:
         ld (D_CHAR),a
@@ -743,6 +628,11 @@ D_PRINT:
         call D_WRITE_CELL
         jp D_FORWARD
 D_WRITE_CELL:
+        ld b,a
+        ld a,(Z_KIND)
+        cp 2
+        ld a,b
+        jp nc,Z_TEXT_CELL
         call D_VWRITE
         ld a,d
         add a,0x10
@@ -787,27 +677,18 @@ D_GLYPH_LOAD:
         djnz D_GLYPH_LOAD
         ret
 D_DRAW_GLYPH:
-        xor a
-        ld (D_GROW),a
+        ld c,0
 D_GLYPH_ROW:
-        ; Sample the 12-row native font at six useful rows. Seven-pixel
-        ; cells have a final background scanline. UDGs use the same mapping.
-        ld a,(D_GROW)
-        cp 6
-        ld a,0
-        jr nc,D_GLYPH_BITS
-        ld a,(D_GROW)
+        ; Native 8x12 font cells: no BBC row sampling or width stretching.
+        ld a,c
         ld e,a
         ld d,0
-        ld hl,D_FONT_ROWS
-        add hl,de
-        ld e,(hl)
         ld hl,D_GLYPH
         add hl,de
         ld a,(hl)
 D_GLYPH_BITS:
         ld (D_BITS),a
-        ld a,(D_GROW)
+        ld a,c
         ld e,a
         ld d,0
         ld hl,(D_GY)
@@ -816,8 +697,7 @@ D_GLYPH_BITS:
         ld a,(D_GRAPH_TEXT)
         or a
         call z,V_ADDRESS       ; opaque rows advance a VRAM pointer directly
-        ld a,(D_GW)
-        ld b,a
+        ld b,8
 D_GLYPH_COL:
         ld a,(D_GRAPH_TEXT)
         or a
@@ -836,33 +716,16 @@ D_GLYPH_WRITE:
         call V_WRITE
 D_GLYPH_NEXT:
         inc de
-        ld a,(D_GW)
-        cp 16
-        jr nz,D_GLYPH_ROTATE
-        bit 0,b                ; 16-pixel cells repeat each source bit twice
-        jr z,D_GLYPH_STEP
-D_GLYPH_ROTATE:
         ld a,(D_BITS)
         rlca
-        ld c,a
-        ld a,(D_GW)
-        cp 4
-        ld a,c
-        jr nz,D_GLYPH_SAVE
-        rlca                   ; four-pixel cells sample alternate source bits
-D_GLYPH_SAVE:
         ld (D_BITS),a
 D_GLYPH_STEP:
         djnz D_GLYPH_COL
-        ld a,(D_GROW)
-        inc a
-        ld (D_GROW),a
-        ld b,a
-        ld a,(D_GH)
-        cp b
+        inc c
+        ld a,c
+        cp 12
         jp nz,D_GLYPH_ROW
         ret
-D_FONT_ROWS: defb 1,3,5,6,8,10
 D_GRAPH_PRINT:
         ld a,(D_BITMAP)
         or a
@@ -872,9 +735,6 @@ D_GRAPH_PRINT:
         call G_TRANSFORM
         ld (D_GX),de
         ld (D_GY),hl
-        call D_CHAR_WIDTH
-        ld a,6
-        ld (D_GH),a
         call D_LOAD_GLYPH
         call D_DRAW_GLYPH
         jp D_FORWARD
@@ -909,7 +769,7 @@ D_WINDOW_EXPAND:
         ld a,(D_BITMAP)
         or a
         ret z
-        call D_CHAR_WIDTH
+        ld b,8
         ld hl,(D_L)
         ld de,(D_R)
         inc de                 ; scale the exclusive right boundary
@@ -996,25 +856,12 @@ D_SCROLL:
         ld a,(D_BITMAP)
         or a
         jr z,D_SCROLL_BEGIN
-        ld a,(D_TOP)
-        ld (D_SCROLL_LINE),a
-        call D_SCROLL_METRICS
+        ld hl,12
+        ld (D_SCROLL_H),hl
 D_SCROLL_BEGIN:
         ld hl,(D_T)
         ld (D_CY),hl
 D_SCROLL_ROW:
-        ld a,(D_BITMAP)
-        or a
-        jr z,D_SCROLL_ROW_READY
-        ld hl,(D_CY)
-        ld de,(D_SCROLL_BOUNDARY)
-        or a
-        sbc hl,de
-        jr c,D_SCROLL_ROW_READY
-        ld a,(D_SCROLL_LINE)
-        inc a
-        ld (D_SCROLL_LINE),a
-        call D_SCROLL_METRICS
 D_SCROLL_ROW_READY:
         ld de,(D_L)
         ld hl,(D_CY)
@@ -1023,19 +870,6 @@ D_SCROLL_ROW_READY:
         ld hl,(D_CY)
         ld de,(D_SCROLL_H)
         add hl,de
-        ld a,(D_BITMAP)
-        or a
-        jr z,D_SCROLL_SOURCE_READY
-        ; Stretch the final scanline of a short source cell when the target
-        ; cell is taller; never read a scanline from the following text row.
-        ld de,(D_SCROLL_SOURCE_END)
-        push hl
-        or a
-        sbc hl,de
-        pop hl
-        jr c,D_SCROLL_SOURCE_READY
-        jr z,D_SCROLL_SOURCE_READY
-        ex de,hl
 D_SCROLL_SOURCE_READY:
         ld de,(D_B)
         push hl
@@ -1102,24 +936,6 @@ D_COPY_TEXT:
         or c
         jr nz,D_COPY_TEXT
         ret
-D_SCROLL_METRICS:
-        ld a,(D_SCROLL_LINE)
-        call D_ROW_Y
-        push hl
-        ld a,(D_SCROLL_LINE)
-        inc a
-        call D_ROW_Y
-        ld (D_SCROLL_BOUNDARY),hl
-        pop de
-        or a
-        sbc hl,de
-        ld (D_SCROLL_H),hl
-        ld a,(D_SCROLL_LINE)
-        add a,2
-        call D_ROW_Y
-        dec hl
-        ld (D_SCROLL_SOURCE_END),hl
-        ret
 ; UDG definition: store an 8x8 BBC glyph expanded into the ZVB 8x12 font.
 D_DEFINE:
         ld a,(D_PARAMS)
@@ -1127,6 +943,13 @@ D_DEFINE:
         ret z                 ; VDU 23,1 cursor visibility (no bitmap cursor)
         cp 32
         jp c,D_UNSUPPORTED
+        ld a,(Z_KIND)
+        cp 2
+        jr c,D_DEFINE_NATIVE
+        ld a,(D_PARAMS)
+        cp 128
+        jp nc,D_UNSUPPORTED
+D_DEFINE_NATIVE:
         call D_SAVE
         ld a,(D_PARAMS)
         call D_FONT_ADDRESS
@@ -1147,7 +970,10 @@ D_DEFINE_ROW:
         inc de
         inc c
         djnz D_DEFINE_ROW
-        ret
+        ld a,(Z_KIND)
+        cp 2
+        ret c
+        jp Z_TILE_FONT
 D_EXPAND_ROWS: defb 0,0,1,2,2,3,4,4,5,6,6,7
 D_EXIT:
         ld a,(D_SAVED)
@@ -1171,4 +997,5 @@ D_RESTORE_FONT:
         ld (D_SAVED),a
         ld c,CMD_RESET_SCREEN
         call D_IOCTL
+        call Z_NATIVE_STATE
         jp D_RESET_SEQUENCE

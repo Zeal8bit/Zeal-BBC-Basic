@@ -693,6 +693,112 @@ static unsigned tokenize_source(const char *path, uint8_t *dest) {
     fclose(fp); dest[length++] = 0; dest[length++] = 255; dest[length++] = 255;
     return length;
 }
+static void text_import(const void *source, unsigned length) {
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory + symbol("ACCS"), "anything.bbcbas");
+    memcpy(file, source, length); file_size = length;
+    run();
+}
+static void test_text_import(void) {
+    const char *paths[]={"examples/gfx/rainbow.bas", "examples/gfx/fireworks.bas",
+                         "examples/gfx/bounce.bas", "examples/gfx/tileparty.bas"};
+    for (unsigned i=0;i<4;i++) {
+        uint8_t expected[8192], source[8192];
+        unsigned length=tokenize_source(paths[i],expected);
+        FILE *fp=fopen(paths[i],"rb"); assert(fp);
+        unsigned size=fread(source,1,sizeof(source),fp); fclose(fp);
+        text_import(source,size);
+        CHECK(!basic_error); CHECK(closed==1); CHECK(!native_open[2]);
+        CHECK(!strcmp(opened_name,"anything.bbcbas"));
+        CHECK(!memcmp(memory+symbol("USER"),expected,length));
+        CHECK((memory[symbol("TOP")]|memory[symbol("TOP")+1]<<8)==symbol("USER")+length);
+        CHECK(memory[symbol("TEXT_ACTIVE")]==0); CHECK(!invalid_buffer);
+        CHECK(file_pos==file_size); /* every byte came through the read adapter */
+    }
+    const char *endings[]={"10 END\n", "10 END\r\n", "10 END\r", "10 END"};
+    uint8_t expected[64]; unsigned length;
+    text_import(endings[0],strlen(endings[0]));
+    length=(memory[symbol("TOP")]|memory[symbol("TOP")+1]<<8)-symbol("USER");
+    memcpy(expected,memory+symbol("USER"),length);
+    for (unsigned i=0;i<4;i++) {
+        text_import(endings[i],strlen(endings[i]));
+        CHECK(!basic_error); CHECK(!memcmp(memory+symbol("USER"),expected,length));
+    }
+    const char indented[]=" \t\r\n\t10\tEND\r\n \t";
+    text_import(indented,strlen(indented));
+    CHECK(!basic_error); CHECK(!memcmp(memory+symbol("USER"),expected,length));
+    text_import("",0); CHECK(!basic_error); CHECK(memory[symbol("USER")]==0);
+    CHECK(memory[symbol("USER")+1]==255 && memory[symbol("USER")+2]==255);
+    const char highest[]="10 END\n65535 END\n";
+    text_import(highest,strlen(highest)); CHECK(!basic_error);
+    CHECK(memory[symbol("USER")+6]==255 && memory[symbol("USER")+7]==255);
+    char boundary[256]; memset(boundary,'A',sizeof(boundary));
+    memcpy(boundary,"10 REM ",7); boundary[255]='\n';
+    text_import(boundary,sizeof(boundary)); CHECK(!basic_error);
+    CHECK(memory[symbol("USER")]==254); CHECK(!invalid_buffer);
+
+    const char *bad[]={"PRINT 1\n", "0 END\n", "10 END\n10 END\n",
+                       "20 END\n10 END\n", "65536 END\n", "10\n",
+                       "10 END\nRUN\n", "10 END\n20 PRINT \x80\n", "10 END\0\n"};
+    for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++) {
+        text_import(bad[i],i==8 ? 9 : strlen(bad[i]));
+        CHECK(basic_error==255 || basic_error==20);
+        invoke("RESET");
+        CHECK(memory[symbol("USER")]==0); CHECK(memory[symbol("TEXT_ACTIVE")]==0);
+        CHECK(!native_open[2]); CHECK(memory[symbol("ERRTRP")]==0);
+    }
+    /* Raw lines cannot overflow ACCS, and lexer expansion cannot overflow BUFFER. */
+    char long_line[300]; memset(long_line,'A',sizeof(long_line));
+    memcpy(long_line,"10 REM ",7); long_line[sizeof(long_line)-1]='\n';
+    text_import(long_line,sizeof(long_line)); CHECK(basic_error==255);
+    CHECK(strstr(output,"Text source line 1")!=NULL);
+    CHECK(memory[symbol("USER")]==0); CHECK(!native_open[2]);
+    char expanded[256]="10 ";
+    /* Short source line references expand to four-byte encoded line numbers. */
+    for (unsigned i=0;i<55;i++) strcat(expanded,"G.1:");
+    strcat(expanded,"END\n");
+    text_import(expanded,strlen(expanded));
+    CHECK(cpu.pc==symbol("EXTERR")); /* native lexer's Line space error is ERR=0 */
+    invoke("RESET"); CHECK(memory[symbol("USER")]==0); CHECK(!native_open[2]);
+
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory+symbol("ACCS"),"missing.bas"); file_exists=0;
+    memory[symbol("USER")]=77; run();
+    CHECK(basic_error==132); CHECK(memory[symbol("USER")]==77); CHECK(!opened);
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory+symbol("ACCS"),"test.bas");
+    memcpy(file,"10 END\n",7); file_size=7; fail_transfer=4;
+    run(); CHECK(basic_error==147); invoke("RESET");
+    CHECK(memory[symbol("USER")]==0); CHECK(!native_open[2]);
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory+symbol("ACCS"),"test.bas");
+    memcpy(file,"10 END\n",7); file_size=7; close_errors[2]=6;
+    run(); CHECK(basic_error==134); invoke("RESET");
+    CHECK(memory[symbol("USER")]==0); CHECK(native_open[2]);
+    close_errors[2]=0; invoke("OSCLEAN"); CHECK(!native_open[2]);
+
+    reset("Z_IMPORT_TEXT"); program_error_location(); prepare_keyboard();
+    strcpy((char *)memory+symbol("ACCS"),"test.bas");
+    memcpy(file,"10 END\n",7); file_size=7; keys[0]=0xf0; key_size=1;
+    run(); CHECK(basic_error==17); invoke("RESET");
+    CHECK(memory[symbol("USER")]==0); CHECK(!native_open[2]);
+    CHECK(strstr(output,"Text source line 1")!=NULL);
+
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory+symbol("ACCS"),"test.bas");
+    memcpy(file,long_line,100); file[99]='\n'; file_size=100;
+    cpu.sp=symbol("USER")+280;
+    run(); CHECK(cpu.pc==symbol("EXTERR")); CHECK(memory[symbol("USER")]==0);
+    CHECK(!native_open[2]); CHECK(strstr(output,"Text source line 1")!=NULL);
+
+    /* Parse the public syntax, including a filename expression with any suffix. */
+    unsigned size=tokenize_text("LOAD$ \"anything\"+\".bbcbas\"\n",expected);
+    reset("XEQ"); program_error_location();
+    memcpy(memory+0xf200,expected,size+1); memory[0xf200+size]=10; cpu.iy=0xf200;
+    memcpy(file,"10 END\n",7); file_size=7; stop_pc=symbol("WARM"); run();
+    CHECK(!basic_error); CHECK(cpu.pc==stop_pc); CHECK(!strcmp(opened_name,"anything.bbcbas"));
+    CHECK(memory[symbol("USER")]==5); CHECK(memory[symbol("USER")+1]==10);
+}
 static unsigned example_line(const uint8_t *program, unsigned number) {
     for (unsigned pos = 0; program[pos]; pos += program[pos]) {
         if ((program[pos+1] | program[pos+2] << 8) == number) return pos;
@@ -798,7 +904,7 @@ static void test_line_raster(void) {
     for (unsigned i=0;i<sizeof(endpoints)/sizeof(*endpoints);i++) {
         for (unsigned reverse=0;reverse<2;reverse++) {
             for (unsigned family=0;family<64;family+=8) {
-                reset("D_MODE"); cpu.a=1; run(); CHECK(!basic_error);
+                reset("D_MODE"); cpu.a=8; run(); CHECK(!basic_error);
                 const int *p=endpoints[i]; unsigned a=reverse ? 2 : 0, b=reverse ? 0 : 2;
                 plot(4,p[a],p[a+1]); plot(family+5,p[b],p[b+1]);
                 memset(expected,0,sizeof(expected));
@@ -809,7 +915,7 @@ static void test_line_raster(void) {
                 for (;;) {
                     int last=x==tx && y==ty;
                     if (!(family&8 && last) && !(family&32 && !step) && !(family&16 && (step&1))
-                        && x>=0 && x<320 && y>=0 && y<200) expected[y*320+x]=3;
+                        && x>=0 && x<320 && y>=0 && y<200) expected[y*320+x]=255;
                     if (last) break;
                     int twice=error*2;
                     if (twice>=dy) { error+=dy; x+=sx; }
@@ -822,10 +928,10 @@ static void test_line_raster(void) {
     }
 }
 static void test_fill_boundary(void) {
-    reset("D_MODE"); cpu.a=1; run(); CHECK(!basic_error);
-    cpu.a=0; cpu.e=2; invoke("G_COLOUR");
+    reset("D_MODE"); cpu.a=8; run(); CHECK(!basic_error);
+    cpu.a=0; set_de(2); invoke("G_COLOUR");
     plot(4,80,80); plot(5,80,200); plot(4,200,80); plot(5,200,200);
-    cpu.a=0; cpu.e=1; invoke("G_COLOUR"); plot(77,120,120);
+    cpu.a=0; set_de(1); invoke("G_COLOUR"); plot(77,120,120);
     CHECK(point(40,120)==0 && point(80,120)==2);
     CHECK(point(120,120)==1 && point(200,120)==2 && point(240,120)==0);
     /* A seed on an existing non-background pixel must not fill or erase it. */
@@ -853,36 +959,30 @@ static void test_video_spans(void) {
     CHECK(!video_accesses && cpu.mmu.pages[2]==2);
 }
 static void test_glyph_raster(void) {
-    const unsigned modes[]={0,1,2,4,5}, widths[]={4,8,16,8,16};
     const uint8_t glyph[]={0x81,0x42,0x24,0x18,0x81,0xff,0x55,0xaa};
-    const unsigned sampled[]={0,2,3,4,5,6};
-    for (unsigned i=0;i<5;i++) {
-        reset("D_MODE"); cpu.a=modes[i]; run(); CHECK(!basic_error);
+    const unsigned expanded[]={0,0,1,2,2,3,4,4,5,6,6,7};
+    for (unsigned mode=8;mode<=9;mode++) {
+        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
         display_byte(23); display_byte(224); vdu(glyph,8);
         const uint8_t cursor[]={31,1,3}; vdu(cursor,sizeof(cursor)); display_byte(224);
-        unsigned width=widths[i], ink=memory[symbol("D_MASK")];
-        for (unsigned y=18;y<25;y++) {
-            for (unsigned x=width-1;x<=width*2;x++) {
-                unsigned want=0;
-                if (x>=width && x<width*2 && y<24) {
-                    unsigned bit=(x-width)*8/width;
-                    if (glyph[sampled[y-18]] & (0x80>>bit)) want=ink;
-                }
-                CHECK(video[0x10000+y*320+x]==want);
+        unsigned stride=mode==8 ? 320 : 256;
+        for (unsigned y=35;y<=48;y++) for (unsigned x=7;x<=16;x++) {
+            unsigned want=0;
+            if (x>=8 && x<16 && y>=36 && y<48 && (glyph[expanded[y-36]] & (0x80>>(x-8)))) want=255;
+            CHECK(video[0x10000+y*stride+x]==want);
+        }
+        /* Transparent graphics text applies XOR and advances by one native cell. */
+        unsigned gx=mode==8 ? 40 : 32, gy=mode==8 ? 121 : 146;
+        for (unsigned y=0;y<12;y++) memset(video+0x10000+(gy+y)*stride+gx,1,8);
+        cpu.a=3; set_de(2); invoke("G_COLOUR"); display_byte(5);
+        for (unsigned pass=0;pass<2;pass++) {
+            plot(4,160,400); display_byte(224);
+            for (unsigned y=0;y<12;y++) for (unsigned x=0;x<8;x++) {
+                unsigned want=pass==0 && (glyph[expanded[y]] & (0x80>>x)) ? 3 : 1;
+                CHECK(video[0x10000+(gy+y)*stride+gx+x]==want);
             }
+            CHECK((memory[symbol("G_X")]|memory[symbol("G_X")+1]<<8)==(mode==8 ? 192 : 200));
         }
-    }
-    reset("D_MODE"); cpu.a=1; run();
-    display_byte(23); display_byte(224); vdu(glyph,8);
-    for (unsigned y=121;y<127;y++) memset(video+0x10000+y*320+40,1,8);
-    cpu.a=3; cpu.e=2; invoke("G_COLOUR"); display_byte(5);
-    for (unsigned pass=0;pass<2;pass++) {
-        plot(4,160,400); display_byte(224);
-        for (unsigned y=0;y<6;y++) for (unsigned x=0;x<8;x++) {
-            unsigned want=pass==0 && (glyph[sampled[y]] & (0x80>>x)) ? 3 : 1;
-            CHECK(video[0x10000+(121+y)*320+40+x]==want);
-        }
-        CHECK((memory[symbol("G_X")]|memory[symbol("G_X")+1]<<8)==192);
     }
 }
 static void test_runtime_video_state(void) {
@@ -894,69 +994,157 @@ static void test_runtime_video_state(void) {
     CHECK((memory[symbol("G_RIGHT")]|memory[symbol("G_RIGHT")+1]<<8)==1279);
     CHECK((memory[symbol("G_TOP")]|memory[symbol("G_TOP")+1]<<8)==1023);
 }
+static int floor_divide(int value,int divisor) { return value>=0 ? value/divisor : (value-divisor+1)/divisor; }
 static void test_scaled_coordinates(void) {
-    reset("G_SCALE_Y");
-    for (int y=-32768;y<=32767;y+=37) {
-        int row=y>=0 ? y/4 : (y-3)/4;
-        int product=row*25;
-        int expected=199-(product>=0 ? product/32 : (product-31)/32);
-        set_hl((uint16_t)y); invoke("G_SCALE_Y");
-        CHECK((int16_t)(cpu.h<<8|cpu.l)==expected);
+    for (unsigned mode=8;mode<=9;mode++) {
+        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        int height=mode==8 ? 200 : 240;
+        for (int y=-32768;y<=32767;y+=37) {
+            int expected=height-1-floor_divide(floor_divide(y,4)*height,256);
+            set_hl((uint16_t)y); invoke("G_SCALE_Y"); CHECK((int16_t)(cpu.h<<8|cpu.l)==expected);
+            set_hl((uint16_t)y); invoke("G_SCALE_X"); CHECK((int16_t)(cpu.h<<8|cpu.l)==floor_divide(y,mode==8 ? 4 : 5));
+        }
     }
-    set_hl(32767); invoke("G_SCALE_Y"); CHECK((int16_t)(cpu.h<<8|cpu.l)==-6200);
 }
 static void test_text_window_rectangles(void) {
-    const unsigned widths[]={4,8,16,1,8,16,1};
-    for (unsigned mode=0;mode<7;mode++) {
-        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
-        const uint8_t window[]={28,3,6,5,2}, cursor[]={31,1,1};
-        vdu(window,sizeof(window)); vdu(cursor,sizeof(cursor));
-        invoke("D_WINDOW_RECT"); CHECK(!basic_error);
-        CHECK(memory[symbol("D_X")]==4 && memory[symbol("D_Y")]==3);
-        unsigned bitmap=mode!=3 && mode!=6, width=widths[mode];
-        unsigned left=3*width, right=6*width-1;
-        unsigned top=bitmap ? 12 : 2, bottom=bitmap ? 42 : 6;
+    const unsigned modes[]={3,6,8,9,10,11,12,13};
+    for (unsigned i=0;i<8;i++) {
+        unsigned mode=modes[i]; reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        const uint8_t window[]={28,3,6,5,2}, cursor[]={31,1,1}; vdu(window,sizeof(window)); vdu(cursor,sizeof(cursor));
+        invoke("D_WINDOW_RECT"); CHECK(!basic_error); CHECK(memory[symbol("D_X")]==4 && memory[symbol("D_Y")]==3);
+        unsigned bitmap=mode==8 || mode==9, tiles=mode>=10;
+        unsigned left=bitmap ? 24 : 3, right=bitmap ? 47 : 5, top=bitmap ? 24 : 2, bottom=bitmap ? 83 : 6;
         CHECK((memory[symbol("D_L")]|memory[symbol("D_L")+1]<<8)==left);
         CHECK((memory[symbol("D_R")]|memory[symbol("D_R")+1]<<8)==right);
         CHECK((memory[symbol("D_T")]|memory[symbol("D_T")+1]<<8)==top);
         CHECK((memory[symbol("D_B")]|memory[symbol("D_B")+1]<<8)==bottom);
-        unsigned base=bitmap ? 0x10000 : 0, stride=bitmap ? 320 : 80;
-        memset(video+base,7,bitmap ? 64000 : 3200);
+        unsigned base=bitmap ? 0x10000 : 0, stride=bitmap ? (mode==8 ? 320 : 256) : 80;
+        memset(video+base,7,bitmap ? (mode==8 ? 64000 : 61440) : 3200);
         invoke("D_CLEAR"); CHECK(!basic_error);
-        for (unsigned y=top-1;y<=bottom+1;y++) {
-            for (unsigned x=left-1;x<=right+1;x++) {
-                unsigned want=(x>=left && x<=right && y>=top && y<=bottom) ? (bitmap ? 0 : 32) : 7;
-                CHECK(video[base+y*stride+x]==want);
-            }
+        for (unsigned y=top-1;y<=bottom+1;y++) for (unsigned x=left-1;x<=right+1;x++) {
+            unsigned blank=bitmap ? 0 : tiles ? 160 : 32;
+            unsigned want=(x>=left && x<=right && y>=top && y<=bottom) ? blank : 7;
+            CHECK(video[base+y*stride+x]==want);
         }
         invoke("GETCSR"); CHECK(cpu.e==0 && cpu.l==0);
     }
 }
+static unsigned rgb332(unsigned index) {
+    unsigned r=index>>5, g=(index>>2)&7, b=index&3;
+    return ((r*4+r/2)<<11)|((g*8+g)<<5)|(b*8+b*2+b/2);
+}
 static void test_default_palettes(void) {
     const unsigned rgb[]={0,0xf800,0x07e0,0xffe0,0x001f,0xf81f,0x07ff,0xffff};
-    for (unsigned mode=0;mode<7;mode++) {
-        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+    const unsigned modes[]={3,6,8,9,10,11,12,13};
+    for (unsigned k=0;k<8;k++) {
+        unsigned mode=modes[k]; reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
         unsigned mask=memory[symbol("D_MASK")];
         CHECK(memory[symbol("G_ACTION")]==0 && memory[symbol("G_BG")]==0);
-        CHECK(memory[symbol("G_FG")]==mask && memory[symbol("D_FG")]==mask);
-        for (unsigned i=0;i<16;i++) {
-            unsigned want=rgb[i&7];
-            if (mask==1 && i==1) want=0xffff;
-            if (mask==3 && i==2) want=0xffe0;
-            if (mask==3 && i==3) want=0xffff;
+        for (unsigned i=0;i<=mask;i++) {
+            unsigned want=mask==255 ? rgb332(i) : rgb[i&7];
+            if (mode>=10 && i==mask-1) want=0xffff;
+            if (mode>=10 && i==mask) want=0;
             CHECK((video[0xe00+i*2]|video[0xe01+i*2]<<8)==want);
         }
     }
-    reset("D_MODE"); cpu.a=2; run();
+    reset("D_MODE"); cpu.a=8; run();
     for (unsigned i=0;i<8;i++) {
-        const uint8_t colour[]={19,15,i,0,0,0}; vdu(colour,sizeof(colour));
-        CHECK((video[0xe1e]|video[0xe1f]<<8)==rgb[i]);
+        const uint8_t colour[]={19,255,i,0,0,0}; vdu(colour,sizeof(colour));
+        CHECK((video[0xffe]|video[0xfff]<<8)==rgb[i]);
     }
+}
+static void test_mode_contract(void) {
+    const unsigned invalid[]={0,1,2,4,5,7,14,255};
+    for (unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);i++) {
+        reset("D_MODE"); cpu.a=invalid[i]; run();
+        CHECK(basic_error==255 && !video_accesses);
+        CHECK(memory[symbol("D_MODE_NO")]==3 && !memory[symbol("D_ACTIVE")]);
+    }
+    for (unsigned mode=3;mode<=6;mode+=3) {
+        reset("D_MODE"); cpu.a=8; run();
+        const uint8_t glyph[]={23,224,255,255,255,255,255,255,255,255}; vdu(glyph,sizeof(glyph));
+        cpu.a=mode; invoke("D_MODE"); CHECK(!basic_error);
+        unsigned cols=mode==3 ? 80 : 40, rows=mode==3 ? 40 : 20;
+        CHECK(video_ports[0x9c]==(mode==3 ? 0 : 1));
+        CHECK(memory[symbol("D_COLS")]==cols && memory[symbol("D_ROWS")]==rows);
+        CHECK(!memory[symbol("D_BITMAP")]); CHECK(!memcmp(video+0x3000,default_font,DEFAULT_FONT_SIZE));
+        for (unsigned y=0;y<rows;y++) for (unsigned x=cols;x<80;x++) video[y*80+x]=0x9a;
+        memset(video+rows*80,0x9b,80);
+        video[(rows-1)*80]='A';
+        const uint8_t cursor[]={31,cols-1,rows-1}; vdu(cursor,sizeof(cursor)); display_byte('Z');
+        CHECK(video[(rows-2)*80]=='A' && video[(rows-2)*80+cols-1]=='Z');
+        for (unsigned x=0;x<cols;x++) CHECK(video[(rows-1)*80+x]==' ');
+        for (unsigned y=0;y<rows;y++) for (unsigned x=cols;x<80;x++) CHECK(video[y*80+x]==0x9a);
+        for (unsigned x=0;x<80;x++) CHECK(video[rows*80+x]==0x9b);
+        invoke("GETCSR"); CHECK(cpu.e==0 && cpu.l==rows-1);
+        display_byte(31); display_byte(0); cpu.a=rows; invoke("OSWRCH"); CHECK(basic_error==255);
+    }
+}
+static void test_native_colours(void) {
+    uint8_t statement[256];
+    unsigned size=tokenize_text("GCOL 0,200:PLOT 69,80,80:A%=POINT(80,80):GCOL 0,456:CLG:B%=POINT(80,80):COLOUR 201:COLOUR 457:END",statement);
+    reset("D_MODE"); program_error_location(); cpu.a=8; run();
+    memcpy(memory+0xf200,statement,size); memory[0xf200+size]=10;
+    cpu.iy=0xf200; stop_pc=symbol("CLOOP"); invoke("XEQ"); CHECK(!basic_error);
+    CHECK(memory[symbol("STAVAR")+4]==200 && memory[symbol("STAVAR")+8]==200);
+    CHECK(memory[symbol("D_FG")]==201 && memory[symbol("D_BG")]==201);
+    CHECK(memory[symbol("G_FG")]==200 && memory[symbol("G_BG")]==200);
+    const char *invalid[]={"-1\n","512\n","65536\n"};
+    for (unsigned i=0;i<3;i++) {
+        reset("D_MODE"); cpu.a=8; run(); strcpy((char*)memory+0xf200,invalid[i]); cpu.iy=0xf200;
+        invoke("COLOUR"); CHECK(basic_error==255);
+    }
+    reset("D_MODE"); cpu.a=3; run();
+    strcpy((char*)memory+0xf200,"129\n"); cpu.iy=0xf200; stop_pc=symbol("CLOOP"); invoke("COLOUR");
+    CHECK(!basic_error && memory[symbol("D_BG")]==1);
+    strcpy((char*)memory+0xf200,"256\n"); cpu.iy=0xf200; stop_pc=0; invoke("COLOUR"); CHECK(basic_error==255);
+}
+static void test_native_tilemaps(void) {
+    const unsigned hardware[]={5,4,7,6};
+    for (unsigned mode=10;mode<=13;mode++) {
+        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        unsigned packed=mode>=12, mask=packed ? 15 : 255;
+        CHECK(video_ports[0x9c]==hardware[mode-10]);
+        CHECK(memory[symbol("D_COLS")]==(mode%2==0 ? 20 : 40));
+        CHECK(memory[symbol("D_ROWS")]==(mode%2==0 ? 15 : 30));
+        for (unsigned i=0;i<1024;i++) CHECK(video[0x2800+i]==0);
+        for (unsigned i=0;i<256;i++) CHECK(video[0x10000+i]==0);
+        unsigned tile=193, offset=0x10000+tile*(packed ? 128 : 256);
+        for (unsigned y=0;y<16;y++) for (unsigned x=0;x<16;x++) {
+            unsigned want=mask;
+            if (x<8 && y<12 && (default_font[65*12+y] & (0x80>>x))) want=mask-1;
+            unsigned raw=video[offset+y*(packed ? 8 : 16)+(packed ? x/2 : x)];
+            unsigned got=packed ? ((x&1) ? raw&15 : raw>>4) : raw;
+            CHECK(got==want);
+        }
+        display_byte('A'); CHECK(video[0]==193 && video[1]==160);
+        if (packed) CHECK(video[0x1000]==0);
+        const uint8_t custom[]={23,65,255,255,255,255,255,255,255,255}; vdu(custom,sizeof(custom));
+        CHECK(video[offset]==(packed ? 0xee : 254));
+        /* All 256 palette indices remain programmable, including 4-bit banks. */
+        const uint8_t bank_colour[]={19,200,16,255,128,0}; vdu(bank_colour,sizeof(bank_colour));
+        CHECK(video[0xf90]==0 && video[0xf91]==0xfc);
+        set_de(packed ? 1 : 224); invoke("D_COLOUR"); CHECK(!basic_error);
+        unsigned ink=mask-1; CHECK((video[0xe00+ink*2]|video[0xe01+ink*2]<<8)==0xf800);
+        set_de(256+(packed ? 4 : 3)); invoke("D_COLOUR"); CHECK(!basic_error);
+        CHECK((video[0xe00+mask*2]|video[0xe01+mask*2]<<8)==0x001f);
+        CHECK((video[0xe00+ink*2]|video[0xe01+ink*2]<<8)==0xf800);
+        cpu.a=69; set_de(80); set_hl(80); invoke("G_PLOT"); CHECK(basic_error==255);
+    }
+}
+static void test_mode9_drawing(void) {
+    reset("D_MODE"); cpu.a=9; run(); CHECK(!basic_error);
+    cpu.a=0; set_de(200); invoke("G_COLOUR");
+    plot(4,0,0); plot(5,0,1023); CHECK(point(0,0)==200 && point(0,1023)==200);
+    invoke("G_CLEAR"); plot(4,0,0); plot(4,1279,0); plot(85,640,400);
+    CHECK(point(640,100)==200 && point(640,500)==0);
+    CHECK(video[0x10000+216*256+128]==200);
+    CHECK(point(1280,0)==-1 && point(0,1024)==-1);
 }
 static void test_graphics_semantics(void) {
     uint8_t statement[256];
     unsigned size = tokenize_text("GCOL 0,2:MOVE 0,0:DRAW 80,80:A%=POINT(80,80):B%=POINT(-4,0):END", statement);
-    reset("D_MODE"); program_error_location(); cpu.a = 1; run(); CHECK(!basic_error);
+    reset("D_MODE"); program_error_location(); cpu.a = 8; run(); CHECK(!basic_error);
     memcpy(memory + 0xf200, statement, size); memory[0xf200+size] = 10;
     cpu.iy = 0xf200; stop_pc = symbol("CLOOP"); invoke("XEQ");
     CHECK(!basic_error);
@@ -964,13 +1152,13 @@ static void test_graphics_semantics(void) {
     CHECK(memory[symbol("STAVAR")+8] == 255 && memory[symbol("STAVAR")+11] == 255);
     stop_pc = 0;
     invoke("G_CLEAR"); CHECK(!basic_error);
-    cpu.a = 3; cpu.e = 1; invoke("G_COLOUR");
+    cpu.a = 3; set_de(1); invoke("G_COLOUR");
     for (int i=0;i<2;i++) {
         plot(4,40,40); plot(4,200,40); plot(85,120,200);
         CHECK(point(120,80) == (i == 0 ? 1 : 0));
         CHECK(point(120,240) == 0);
     }
-    cpu.a = 0; cpu.e = 2; invoke("G_COLOUR");
+    cpu.a = 0; set_de(2); invoke("G_COLOUR");
     const uint8_t window[] = {24,40,0,40,0,200,0,200,0}; vdu(window,sizeof(window));
     plot(4,-32768,-32768); plot(101,32767,32767);
     CHECK(point(120,120) == 2); CHECK(point(0,0) == -1);
@@ -993,32 +1181,28 @@ static void test_graphics_semantics(void) {
     cpu.iff1 = cpu.iff2 = false;
     set_de(0); invoke("V_READ"); CHECK(!cpu.iff1 && cpu.mmu.pages[0] == 0);
     /* Every GCOL action reads the same stored logical pixel. */
-    const int expected[] = {1,3,0,3,1};
+    const int expected[] = {1,3,0,3,253};
     for (unsigned action=0;action<5;action++) {
-        cpu.a=0; cpu.e=2; invoke("G_COLOUR"); plot(69,400,400);
-        cpu.a=action; cpu.e=1; invoke("G_COLOUR"); plot(69,400,400);
+        cpu.a=0; set_de(2); invoke("G_COLOUR"); plot(69,400,400);
+        cpu.a=action; set_de(1); invoke("G_COLOUR"); plot(69,400,400);
         CHECK(point(400,400) == expected[action]);
     }
-    invoke("G_CLEAR"); cpu.a=0; cpu.e=1; invoke("G_COLOUR");
+    invoke("G_CLEAR"); cpu.a=0; set_de(1); invoke("G_COLOUR");
     plot(4,80,80); plot(5,80,200); plot(4,200,80); plot(5,200,200);
     plot(77,120,120); CHECK(point(120,120)==1); CHECK(point(40,120)==0);
-    invoke("G_CLEAR"); cpu.a=0; cpu.e=1; invoke("G_COLOUR");
+    invoke("G_CLEAR"); cpu.a=0; set_de(1); invoke("G_COLOUR");
     plot(4,0,0); plot(5,80,80);
-    vdu(origin,sizeof(origin)); cpu.a=0; cpu.e=2; invoke("G_COLOUR");
+    vdu(origin,sizeof(origin)); cpu.a=0; set_de(2); invoke("G_COLOUR");
     plot(5,120,120); CHECK(point(40,40)==2);
-    display_byte(26); cpu.a=0; cpu.e=1; invoke("G_COLOUR");
+    display_byte(26); cpu.a=0; set_de(1); invoke("G_COLOUR");
     plot(5,200,200); CHECK(point(120,120)==2);
-    /* Bitmap rows alternate in height. Scroll each row into its own cell
-     * rather than applying one fixed pixel offset to the whole window. */
+    /* Native 8x12 cells scroll exactly one 12-pixel row. */
     const uint8_t bw[]={28,0,5,1,2}; vdu(bw,sizeof(bw));
-    for (unsigned x=0;x<16;x++) {
-        for (unsigned y=12;y<37;y++) video[0x10000+y*320+x]=(y<18 ? 1 : y<25 ? 2 : y<31 ? 3 : 0);
-    }
+    for (unsigned y=24;y<72;y++) for (unsigned x=0;x<16;x++) video[0x10000+y*320+x]=1+(y-24)/12;
     invoke("D_SCROLL"); CHECK(!basic_error);
-    CHECK(video[0x10000+12*320]==2);
-    CHECK(video[0x10000+18*320]==3);
-    CHECK(video[0x10000+24*320]==3);
-    CHECK(video[0x10000+25*320]==0);
+    CHECK(video[0x10000+24*320]==2 && video[0x10000+35*320]==2);
+    CHECK(video[0x10000+36*320]==3 && video[0x10000+59*320]==4);
+    CHECK(video[0x10000+60*320]==0 && video[0x10000+71*320]==0);
     reset("D_MODE"); cpu.a=3; run(); CHECK(!basic_error);
     const uint8_t tw[] = {28,2,2,4,1}; vdu(tw,sizeof(tw));
     display_byte('A'); display_byte('B'); display_byte('C'); display_byte('D');
@@ -1037,17 +1221,17 @@ static void test_graphics_semantics(void) {
     CHECK(video[0x10000] == 2 && cpu.mmu.pages[2] == 2);
 }
 static void test_display(void) {
-    reset("D_MODE"); cpu.a = 1; run(); CHECK(!basic_error);
+    reset("D_MODE"); cpu.a = 8; run(); CHECK(!basic_error);
     CHECK(video_ports[0x9c] == 3); CHECK(cpu.mmu.pages[0] == 0 && cpu.mmu.pages[2] == 2);
-    CHECK(memory[symbol("D_COLS")] == 40); CHECK(memory[symbol("D_ROWS")] == 32);
-    CHECK(video[0xe02] == 0 && video[0xe03] == 0xf8);
+    CHECK(memory[symbol("D_COLS")] == 40); CHECK(memory[symbol("D_ROWS")] == 16);
+    CHECK(video[0xffe] == 255 && video[0xfff] == 255);
     CHECK(point(0,0) == 0); CHECK(point(-1,0) == -1);
-    plot(69,40,40); CHECK(point(40,40) == 3);
+    plot(69,40,40); CHECK(point(40,40) == 255);
     plot(70,40,40); CHECK(point(40,40) == 0);
-    cpu.a = 3; cpu.e = 2; invoke("G_COLOUR"); CHECK(!basic_error);
+    cpu.a = 3; set_de(2); invoke("G_COLOUR"); CHECK(!basic_error);
     plot(69,40,40); CHECK(point(40,40) == 2);
     plot(69,40,40); CHECK(point(40,40) == 0);
-    cpu.a = 0; cpu.e = 1; invoke("G_COLOUR");
+    cpu.a = 0; set_de(1); invoke("G_COLOUR");
     plot(4,0,0); plot(5,80,80);
     CHECK(point(0,0) == 1); CHECK(point(80,80) == 1);
     plot(0,4,4); CHECK((memory[symbol("G_X")] | memory[symbol("G_X")+1] << 8) == 84);
@@ -1057,25 +1241,26 @@ static void test_display(void) {
     display_byte(17); display_byte(2); CHECK(memory[symbol("D_FG")] == 2);
     display_byte(23); display_byte(224);
     for (int i=0;i<8;i++) display_byte(255);
-    display_byte(224); CHECK(video[0x10000 + 62*320 + 40] == 2);
-    CHECK(memory[symbol("D_GH")] == 6);
-    CHECK(video[0x10000 + 68*320 + 40] == 0);
-    for (unsigned row=0;row<32;row++) {
+    display_byte(224); CHECK(video[0x10000 + 120*320 + 40] == 2);
+    CHECK(video[0x10000 + 132*320 + 40] == 0);
+    for (unsigned row=0;row<16;row++) {
         const uint8_t cursor[]={31,0,row}; vdu(cursor,sizeof(cursor));
-        invoke("D_CELL"); CHECK(memory[symbol("D_GH")] == 6 || memory[symbol("D_GH")] == 7);
+        invoke("D_CELL"); CHECK((memory[symbol("D_GY")]|memory[symbol("D_GY")+1]<<8)==row*12);
     }
     display_byte(25); display_byte(69); display_byte(160); display_byte(0); display_byte(160); display_byte(0);
     CHECK(point(160,160) == 1);
     display_byte(31); invoke("RESET"); CHECK(memory[symbol("D_PENDING")] == 0);
     invoke("D_EXIT"); CHECK(!basic_error); CHECK(memory[symbol("D_ACTIVE")] == 0);
     CHECK(!memcmp(video+0x3000,default_font,DEFAULT_FONT_SIZE));
+    CHECK(memory[symbol("D_MODE_NO")]==3 && memory[symbol("Z_KIND")]==0);
+    CHECK(memory[symbol("D_COLS")]==80 && memory[symbol("D_ROWS")]==40);
     const char *invalid_modes[]={"256\n","65536\n","-1\n"};
     for (unsigned i=0;i<3;i++) {
         reset("MODE"); strcpy((char*)memory+0xf200,invalid_modes[i]); cpu.iy=0xf200;
         run(); CHECK(basic_error==255); CHECK(!video_accesses);
     }
     reset("D_MODE"); cpu.a = 7; run(); CHECK(basic_error == 255); CHECK(!video_accesses);
-    reset("D_MODE"); video_ports[0x82] = 0xff; cpu.a = 1; run();
+    reset("D_MODE"); video_ports[0x82] = 0xff; cpu.a = 8; run();
     CHECK(basic_error == 255); CHECK(!video_accesses);
 }
 static void test_graphics_examples(void) {
@@ -1090,7 +1275,7 @@ static void test_graphics_examples(void) {
     unsigned top=symbol("USER")+size;
     memory[symbol("TOP")]=top; memory[symbol("TOP")+1]=top>>8;
     stop_pc=symbol("OSRDCH"); run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
-    CHECK(memory[symbol("D_MODE_NO")]==1); CHECK(point(100,700)==1);
+    CHECK(memory[symbol("D_MODE_NO")]==8); CHECK(point(100,700)==1);
     const char *preview=getenv("BBC_GRAPHICS_PREVIEW");
     if (preview) {
         FILE *fp=fopen(preview,"wb"); assert(fp); fprintf(fp,"P6\n320 200\n255\n");
@@ -1107,9 +1292,10 @@ static void test_graphics_examples(void) {
     reset("RUN0"); program_error_location(); memcpy(memory+symbol("USER"),program,size);
     top=symbol("USER")+size; memory[symbol("TOP")]=top; memory[symbol("TOP")+1]=top>>8;
     stop_pc=symbol("OSRDCH");
-    for (unsigned mode=0;mode<7;mode++) {
+    const unsigned demo_modes[]={3,6,8,9,10,11,12,13};
+    for (unsigned i=0;i<8;i++) {
         run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
-        CHECK(memory[symbol("D_MODE_NO")]==mode);
+        CHECK(memory[symbol("D_MODE_NO")]==demo_modes[i]);
         keys[key_size++]='x'; z80_step(&cpu);
     }
     stop_pc=symbol("WARM"); run(); CHECK(!basic_error);
@@ -1132,7 +1318,12 @@ int main(int argc, char **argv) {
     test_scaled_coordinates();
     test_text_window_rectangles();
     test_default_palettes();
+    test_mode_contract();
+    test_native_colours();
+    test_native_tilemaps();
+    test_mode9_drawing();
     test_graphics_examples();
+    test_text_import();
     test_errors();
     test_loads();
     test_validation();

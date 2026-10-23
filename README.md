@@ -28,6 +28,41 @@ and trailing spaces and tabs are accepted. Empty commands and `*|` comments
 return to BASIC. Other commands, including the original CP/M disk commands,
 raise trappable error 254, `Bad command`.
 
+## Loading programs
+
+`LOAD` reads tokenized BASIC programs. The Zeal extension `LOAD$` reads a numbered
+ASCII source file and tokenizes each line as it is read:
+
+```basic
+LOAD$ "H:/examples/gfx/bounce.bas"
+RUN
+```
+
+The filename extension does not matter: `LOAD$ "H:/something.bbcbas"` works too.
+The filename may be any BASIC string expression. Importing stores the program;
+it does not execute its statements. Use `RUN` afterwards, or `LIST` to inspect it.
+`SAVE "H:/bounce.bbc"` saves the imported program in the normal tokenized format.
+
+Source files must contain nonempty numbered statements with unique, ascending
+line numbers from 1 to 65535. Blank lines are ignored. LF, CRLF and CR endings,
+and a final line without a newline, are accepted. Spaces and tabs may indent a
+line or separate its number from its first statement. Statement contents use the
+same tokenizer as keyboard entry, including uppercase BASIC keywords; tabs
+within statements are kept literal. Files must be ASCII without a byte-order
+mark. A source line may contain at most 255 bytes excluding its line ending;
+the interpreter's existing tokenized-line limit also applies.
+
+An open failure preserves the existing program. Once the file opens, importing
+replaces the program and clears its variables. Invalid input, Escape, insufficient
+memory or a later file error discards the incomplete import and reports the
+source-file line reached. Duplicate/out-of-order numbers, bare line numbers and
+unnumbered commands are rejected. The importer streams through the existing
+line buffers; it does not load the entire source file into a temporary buffer.
+
+Command-line filename autorun still expects a tokenized program; `LOAD$` is an
+interactive command. See [examples/gfx](examples/gfx/README.md) for source files
+and ready-to-load tokenized copies.
+
 ## Keyboard and ZShell
 
 BASIC selects cooked, blocking keyboard input for its command prompt and INPUT,
@@ -44,15 +79,24 @@ video hardware. It does not emulate a TMS chip. Graphics requires ZVB firmware
 1.x or later with its 320x200 indexed bitmap mode; the native emulator supports
 this mode. Physical-board operation has not yet been verified.
 
-| BBC MODE | Text grid | Logical colours | ZVB rendering |
+| MODE | Native display | Text grid | Colour format |
 | --- | --- | --- | --- |
-| 0 | 80x32 | 2 | 320x200 bitmap |
-| 1 | 40x32 | 4 | 320x200 bitmap |
-| 2 | 20x32 | 16 | 320x200 bitmap |
-| 3 | 80x25 | 2 | 640x480 text, software window |
-| 4 | 40x32 | 2 | 320x200 bitmap |
-| 5 | 20x32 | 4 | 320x200 bitmap |
-| 6 | 40x25 | 2 | 640x480 text, 40-column software window |
+| 3 | 640x480 text | 80x40 | 16 text indices; BBC MODE 3 has 25 rows |
+| 6 | 320x240 text | 40x20 | 16 text indices; BBC MODE 6 has 25 rows |
+| 8 | 320x200 bitmap | 40x16 | 8-bit indexed, 256 colours |
+| 9 | 256x240 bitmap | 32x20 | 8-bit indexed, 256 colours |
+| 10 | 320x240 tilemap | 20x15 | 8-bit tiles |
+| 11 | 640x480 tilemap | 40x30 | 8-bit tiles |
+| 12 | 320x240 tilemap | 20x15 | 4-bit tiles |
+| 13 | 640x480 tilemap | 40x30 | 4-bit tiles |
+
+BBC graphics modes **0, 1, 2, 4, 5** are unsupported and raise error 255;
+**MODE 7** is reserved for deferred teletext. They are not approximate aliases
+for Zeal graphics. `MODE 3` restores native 80x40 text and `MODE 6` selects native
+40x20 text without exiting BASIC. `VDU 22,n` selects the same modes.
+
+See [the mode reference](docs/video-modes.md) for all BBC differences, coordinate
+and colour conventions, tile-font reservations, and examples of mode selection.
 
 The startup console retains Zeal OS text output until a mode or application-owned
 text window/palette is selected. `MODE` clears and resets the display. Program
@@ -68,10 +112,11 @@ retained.
 Supported graphics commands are `GCOL action,colour`, `MOVE`, `DRAW`,
 `PLOT operation,x,y`, `CLG`, and `POINT(x,y)`. Coordinates use BBC's 1280x1024
 logical space, bottom-left origin, signed relative plotting, and VDU-controlled
-origin/window. `POINT` returns the stored logical colour, or -1 outside the
+origin/window in bitmap modes 8/9. `POINT` returns the stored logical colour, or -1 outside the
 screen or graphics window. GCOL actions 0–4 implement replace, OR, AND, XOR, and
-invert; colour+128 selects the graphics background. Logical pixels are mapped to
-the ZVB raster: x/4 and 199-floor(floor(y/4)*25/32). Original BBC pixel grids,
+invert. Zeal graphics modes use colour indices 0-255 for foreground and
+256-511 for background; modes 3/6 retain the BBC colour+128 background convention.
+Logical coordinates are scaled to the selected native bitmap. Original BBC pixel grids,
 aspect ratios, and timing are approximated; high-resolution details can merge.
 
 PLOT families 0–63 (solid/dotted lines with endpoint omission), 64–71 (points),
@@ -93,8 +138,8 @@ VDU 23,1 is accepted; display-owned modes currently have no visible cursor. Prin
 without output; bell and paged-mode-off are no-ops. Paged-mode-on and unsupported
 VDU 23 subcommands raise error 255.
 
-Bitmap text samples the board's font into 4-, 8-, or 16-pixel-wide cells and
-6/7-pixel-high rows; 80-column text is necessarily compressed. Graphics text
+Bitmap text uses native 8x12 character cells. Tilemap text uses reserved 16x16
+font tiles. Graphics text
 (VDU 5) uses transparent backgrounds, GCOL, and the graphics window. Line input
 after MODE uses blocking raw reads, translated keys, and display-aware echo,
 including backspace. Reads return to nonblocking mode before rendering.
@@ -103,6 +148,9 @@ current mode. Long drawing operations continue to poll for Escape.
 
 Mode 7, flashing colours, circles/ellipses/arcs, general flood fill, BBC screen
 memory/MOS/6502 compatibility, sprites, and sound are outside this milestone.
-For 16-colour modes the upper eight physical palette entries initially repeat
-the lower eight without flashing; all sixteen logical entries are programmable.
+Eight-bit graphics use a full RGB332 default palette. Tilemap modes reserve
+96 font tiles and two palette entries for visible BASIC text and input; see the
+mode reference before uploading application assets.
 Try `examples/graphics.bas` and `examples/graphics-modes.bas` as numbered source.
+For small, playful demos, see [examples/gfx](examples/gfx/README.md): rainbow
+string art, fireworks, an XOR bouncing box and native tilemap text.

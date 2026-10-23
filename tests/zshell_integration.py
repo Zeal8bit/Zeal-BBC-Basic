@@ -86,9 +86,9 @@ class Console:
         keys = {'.': 'PERIOD', '/': 'SLASH', ':': 'SEMICOLON', ' ': 'SPACE',
                 '\n': 'ENTER', '%': '5', '=': 'EQUAL', '+': 'EQUAL',
                 '"': 'APOSTROPHE', '*': '8', ',': 'COMMA', ';': 'SEMICOLON',
-                '(': '9', ')': '0', '-': 'MINUS'}
+                '(': '9', ')': '0', '-': 'MINUS', '$': '4'}
         for char in text:
-            shift = char in ':%+"*()' or char.isupper()
+            shift = char in ':%+"*()$' or char.isupper()
             if shift:
                 self.send('press SHIFT')
                 self.run(100_000)
@@ -270,7 +270,51 @@ def exercise(c, b, k, directory):
     assert integer('A') == 73
     print('PASS: SAVE, exit to ZShell, filename auto-run, INPUT and GET after relaunch')
 
-    line('MODE 1')
+    (directory / 'import.bbcbas').write_bytes(b'10 A%=42\r\n20 END')
+    line('LOAD$ "H:/import.bbcbas"')
+    prompt()
+    line('RUN')
+    prompt()
+    assert integer('A') == 42
+    line('SAVE "H:/import.bbc"')
+    prompt()
+    assert (directory / 'import.bbc').read_bytes().endswith(b'\0\xff\xff')
+    for stem, pauses in (('rainbow', 1), ('fireworks', 6), ('bounce', 1), ('tileparty', 4)):
+        shutil.copy2(ROOT / 'examples/gfx' / (stem + '.bas'), directory / (stem + '.bas'))
+        line(f'LOAD$ "H:/{stem}.bas"')
+        prompt()
+        expected = (ROOT / 'examples/gfx' / (stem + '.bbc')).read_bytes()
+        page = int.from_bytes(c.memory(b['PAGE'], 2), 'little')
+        top = int.from_bytes(c.memory(b['TOP'], 2), 'little')
+        actual = b''.join(c.memory(page + offset, min(128, top - page - offset))
+                          for offset in range(0, top - page, 128))
+        assert actual == expected, f'LOAD$ tokens differ for {stem}'
+        line('RUN')
+        c.bp(b['OSRDCH'])
+        c.bp(b['OSLINE'])
+        for pause in range(pauses):
+            for _ in range(30):
+                c.run(30_000_000)
+                pc = c.regs()['PC']
+                if pc == b['OSRDCH']:
+                    break
+                assert pc != b['OSLINE'], f'{stem} returned before its key pause'
+            else:
+                raise AssertionError(f'{stem} did not reach its key pause')
+            mode = 10 + pause if stem == 'tileparty' else (9 if stem == 'bounce' else 8)
+            assert c.memory(b['D_MODE_NO'], 1) == bytes([mode])
+            c.send('tap X')
+            c.send('step')
+        c.clear(b['OSRDCH'])
+        c.until(b['OSLINE'])
+        check_error()
+        assert c.memory(b['D_MODE_NO'], 1) == b'\x03'
+        c.clear(b['OSLINE'])
+        c.bp(line_done())
+        c.run()
+    print('PASS: LOAD$ streaming text, arbitrary extension, SAVE and all four graphics demos')
+
+    line('MODE 8')
     prompt()
     assert c.memory(b['D_BITMAP'], 1) == b'\1'
     line('GCOL 0,2:MOVE 0,0:DRAW 80,80:A%=POINT(80,80)')
@@ -292,7 +336,32 @@ def exercise(c, b, k, directory):
     line('PRINT TAB(5,10);"BBC text";:A%=POS:B%=VPOS')
     prompt()
     assert integer('A') == 13 and integer('B') == 10
-    line('MODE 1')
+    line('MODE 6')
+    prompt()
+    assert c.memory(b['D_COLS'], 1) == bytes([40]) and c.memory(b['D_ROWS'], 1) == bytes([20])
+    line('PRINT TAB(5,10);"Zeal text";:A%=POS:B%=VPOS')
+    prompt()
+    assert integer('A') == 14 and integer('B') == 10
+    line('MODE 9')
+    prompt()
+    assert c.memory(b['D_COLS'], 1) == bytes([32]) and c.memory(b['D_ROWS'], 1) == bytes([20])
+    line('GCOL 0,200:PLOT 69,1279,1023:A%=POINT(1279,1023)')
+    prompt()
+    assert integer('A') == 200
+    for mode in (10, 11, 12, 13):
+        line(f'MODE {mode}')
+        prompt()
+        assert c.memory(b['Z_KIND'], 1) == bytes([2 if mode < 12 else 3])
+        line('PRINT "Tiles";:A%=POS')
+        prompt()
+        assert integer('A') == 5
+        line('INPUT A%')
+        prompt()
+        line('17')
+        prompt()
+        assert integer('A') == 17
+    print('PASS: native 40x20 text, 256x240 bitmap and all four tilemap modes with visible text/input')
+    line('MODE 8')
     prompt()
     line('GCOL 0,1:MOVE 0,0:DRAW 1279,1023:A%=POINT(0,0)')
     prompt()

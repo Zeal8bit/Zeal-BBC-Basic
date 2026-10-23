@@ -23,6 +23,7 @@
         EXTERN	OSINIT
         EXTERN	OSLOAD_SIZE
         EXTERN	OSLOAD
+        EXTERN Z_LOAD_TEXT
         EXTERN	OSSAVE
         EXTERN	OSBGET
         EXTERN	OSBPUT
@@ -75,6 +76,7 @@
         PUBLIC	CREATE
         PUBLIC	PBCDL
         PUBLIC	LEXAN2
+        PUBLIC LINNUM
         PUBLIC	RANGE
 ;
         EXTERN	PAGE
@@ -1018,7 +1020,10 @@ CLOOP0:	JP	CLOOP
 ;
 ;LOAD filename
 ;
-LOAD:	CALL	EXPRS		;GET FILENAME
+LOAD:	CALL NXT
+        CP '$'
+        JP Z,Z_LOAD_TEXT        ; Zeal text-source extension
+        CALL	EXPRS		;GET FILENAME
         XOR A   ; NULL-terminated string
         LD	(DE),A
         CALL	LOAD0

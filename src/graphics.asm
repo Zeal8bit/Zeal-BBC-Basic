@@ -1,4 +1,4 @@
-; BBC raster semantics over a 320x200 ZVB indexed bitmap.
+; BBC logical raster operations over native Zeal indexed bitmaps.
 ; All persistent pixels are logical colour indices in VRAM. Palette changes
 ; never rewrite pixels, and POINT and GCOL therefore see the same colours.
         EXTERN G_ACTION, G_FG, G_BG, G_X, G_Y, G_OLDX
@@ -11,6 +11,7 @@
         PUBLIC G_CLEAR, G_COLOUR, G_PLOT, G_POINT, G_RESET, G_WINDOW
         EXTERN D_BITMAP, D_MASK, D_PARAMS, D_ERROR, D_UNSUPPORTED
         EXTERN G_SPANS
+        EXTERN D_MODE_NO, Z_MAX_X, Z_MAX_Y
         EXTERN V_READ, V_PAINT, V_ADDRESS, TRAP
 
 G_RESET:
@@ -35,7 +36,7 @@ G_COLOUR:
         ld (G_ACTION),a
         ld a,(D_MASK)
         and e
-        bit 7,e
+        bit 0,d
         jr nz,G_BACKGROUND
         ld (G_FG),a
         ret
@@ -101,7 +102,7 @@ G_CLIP_WINDOW:
         ld (G_CL),hl
         ld hl,(G_RIGHT)
         call G_SCALE_X
-        ld de,319
+        ld de,(Z_MAX_X)
         call G_MIN
         ld (G_CR),hl
         ld hl,(G_TOP)
@@ -111,21 +112,70 @@ G_CLIP_WINDOW:
         ld (G_CT),hl
         ld hl,(G_BOTTOM)
         call G_SCALE_Y
-        ld de,199
+        ld de,(Z_MAX_Y)
         call G_MIN
         ld (G_CB),hl
         ret
-; Signed divide X by four. Y maps the BBC's 256 logical pixel rows to 200.
-; Divide by four, then calculate floor(row*25/32) with a signed wide product.
+; BBC logical coordinates: X divides by 4 or 5 for 320/256 pixels.
+; Y maps the BBC's 256 logical pixel rows to 200 or 240 native rows.
 ; This stays in range even for signed coordinates far outside the screen.
 G_SCALE_X:
+        ld a,(D_MODE_NO)
+        cp 9
+        jr z,G_DIV5
+G_DIV4:
         sra h
         rr l
         sra h
         rr l
         ret
+G_DIV5:
+        bit 7,h
+        jr z,G_UDIV5
+        ex de,hl
+        ld hl,4
+        or a
+        sbc hl,de              ; ceil(abs(x)/5), including -32768
+        call G_UDIV5
+        ex de,hl
+        ld hl,0
+        or a
+        sbc hl,de
+        ret
+G_UDIV5:
+        ld e,0
+        ld b,16
+G_DIV5_BIT:
+        add hl,hl
+        rl e
+        ld a,e
+        cp 5
+        jr c,G_DIV5_NEXT
+        sub 5
+        ld e,a
+        inc l
+G_DIV5_NEXT:
+        djnz G_DIV5_BIT
+        ret
 G_SCALE_Y:
-        call G_SCALE_X
+        call G_DIV4
+        ld a,(D_MODE_NO)
+        cp 9
+        jr nz,G_SCALE_Y_200
+        push hl
+        ld de,15
+        add hl,de
+        ld b,4
+G_SCALE_Y_240_DIV:
+        sra h
+        rr l
+        djnz G_SCALE_Y_240_DIV
+        ex de,hl
+        pop hl
+        or a
+        sbc hl,de              ; row - ceil(row/16) = floor(row*15/16)
+        jr G_Y_SCALED
+G_SCALE_Y_200:
         ; Signed 24-bit product A:HL = row * 25. Keeping the sign byte avoids
         ; splitting row into a quotient and remainder for the final /32.
         ld a,h
@@ -156,8 +206,9 @@ G_YDIV:
         rr h
         rr l
         djnz G_YDIV
+G_Y_SCALED:
         ex de,hl
-        ld hl,199
+        ld hl,(Z_MAX_Y)
         or a
         sbc hl,de
         ret
@@ -604,7 +655,7 @@ G_FILL_RIGHT_END:
 ; This avoids double-writing shared edges under XOR.
 G_TRIANGLE:
         ld hl,G_SPANS
-        ld b,200
+        ld b,240
 G_TRI_INIT:
         ld (hl),0xff
         inc hl
@@ -671,7 +722,7 @@ G_TRI_NEXT:
         inc hl
         ld (G_TY),hl
         ld a,l
-        cp 200
+        cp 240
         jr c,G_TRI_ROW
         ret
 G_EDGE:
@@ -698,7 +749,7 @@ G_RECORD:
         or a
         ret nz
         ld a,l
-        cp 200
+        cp 240
         ret nc
         push de
         add hl,hl

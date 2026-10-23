@@ -14,16 +14,19 @@ add_executable(bbcbasic
     src/exec.asm
     src/eval.asm
     src/fpp.asm
-    src/hardware.asm
+    src/zeal_video.asm
     src/zos.asm
     src/display.asm
     src/graphics.asm
     src/ram.asm
+    src/zeal_workspace.asm
+    src/zeal_import.asm
+    src/zeal_modes.asm
 )
 
 # CMake does not scan z80asm INCLUDE directives for dependencies.
 set(zos_sdk_dir "$ENV{ZOS_PATH}/sdk/z88dk-z80asm")
-set_source_files_properties(src/hardware.asm src/display.asm PROPERTIES
+set_source_files_properties(src/zeal_video.asm src/display.asm PROPERTIES
     OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/zos_syscall.asm;${zos_sdk_dir}/zos_sys.asm;${zos_sdk_dir}/zos_video.asm"
 )
 set_source_files_properties(src/zos.asm PROPERTIES

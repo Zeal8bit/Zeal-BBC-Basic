@@ -41,6 +41,8 @@
         EXTERN FILE_CHANNELS, OPTVAL, KEY_QUEUE, KEY_EVENTS, ZOS_BUFFER
         EXTERN G_RESET
         PUBLIC RAW_WRCH
+        PUBLIC FILE_OPEN, FILE_CLOSE, SHOW_ERROR, SHOW_ERROR_NEG
+        EXTERN Z_TEXT_RESET, TEXT_ACTIVE
         EXTERN	USER
 
 
@@ -88,6 +90,7 @@ OSINIT:
         pop bc
         xor a
         ld (ACCS), a
+        ld (TEXT_ACTIVE), a
         ld a, b
         or a
         jr nz, ARG_TOO_LONG    ; maximum 255 bytes plus a terminating NUL
@@ -932,6 +935,7 @@ BYE:
         BBC_SYSCALL(15)
 
 RESET:
+        call Z_TEXT_RESET
         call D_RESET_SEQUENCE
         xor a
         ld (OPTVAL), a

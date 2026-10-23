@@ -56,6 +56,15 @@ Line-input checks cover bounded cooked reads, missing terminators, read failures
 EOF, redirected CRLF streams and overlong-line recovery. Redirected input reads
 through one LF at a time; overlong lines are drained and reported as errors.
 
+`LOAD$` checks import the four graphics source listings through the file adapter
+and compare their records with the original tokenizer. They cover arbitrary
+filename extensions, filename expressions, blank/indented lines, line endings,
+an unterminated final line, empty files, malformed input, line-number ordering,
+source/token buffer limits, memory exhaustion and file failures. Failed imports
+discard incomplete text and release their file handle, retaining failed closes
+for retry. The ZShell integration also imports and runs all four graphics demos
+through the real kernel and compares them with their saved `.bbc` copies.
+
 Cursor checks compare numeric PRINT output with and without two-coordinate TAB,
 including a video driver that overwrites scratch registers. Example checks use
 the assembled BASIC lexer: Hamurabi's binary must match its numbered text source,
@@ -98,9 +107,8 @@ syscalls and the emulated PS/2 device; physical hardware remains unverified.
 The normal regression runner also executes BBC command parsing, VDU sequences,
 all supported GCOL actions, signed/relative plotting, clipping/origin changes,
 POINT, triangles, rectangles, horizontal fills, custom characters, text windows,
-scrolling, raw line editing, and both graphics demonstration programs. Every
-bitmap text row must have a six- or seven-pixel cell height; glyphs must not
-write into adjacent cells. An interrupt is injected while video memory is mapped
+scrolling, raw line editing, and both graphics demonstration programs. Bitmap
+text uses native 8x12 cells and must not write into adjacent cells. An interrupt is injected while video memory is mapped
 to verify arithmetic registers and restoration of the temporary page mapping.
 The font snapshot and other display scratch buffers are deliberately seeded
 with junk before the demo, proving they do not depend on zero-filled file data.
@@ -108,7 +116,7 @@ with junk before the demo, proving they do not depend on zero-filled file data.
 The build runs `tests/check_layout.py` to verify that the image excludes runtime
 workspace, preserves required page alignment, leaves room below HIMEM, and keeps
 video helpers and interrupt wrappers below the temporary video mapping at &8000.
-The 3KB font backup and 800-byte triangle workspace occupy runtime RAM only.
+The 3KB font backup and 960-byte triangle workspace occupy runtime RAM only.
 
 For a bitmap preview of the assembled graphics demonstration, set
 `BBC_GRAPHICS_PREVIEW=/absolute/path/preview.ppm` when running `tests/run.py`.
@@ -129,5 +137,13 @@ and cold-start initialization of graphics state in poisoned runtime RAM.
 The span writer keeps its two mapped-access bytes below &8000; all relocated
 video state and scratch are checked as a separate runtime workspace region.
 Additional checks sample signed Y-coordinate scaling across the full input
-range, verify text-window bounds and clearing in all seven modes, and compare
+range, verify text-window bounds and clearing in all eight supported modes, and compare
 every default palette entry and BBC physical colour against RGB565 values.
+
+Native-mode checks reject BBC graphics selectors before video I/O, verify both
+text grids and font restoration, cover 320x200 and 256x240 bitmap geometry and
+9-bit colour arguments, and inspect 8/4-bit tile-font pixels, reserved colours,
+palette banks and text input. Mode selection lives in a separate Zeal module;
+the inherited hardware module is excluded from the build. The original command
+module has small hooks for display error recovery and `LOAD$`; the executor,
+expression evaluator and floating-point interpreter modules remain unchanged.
