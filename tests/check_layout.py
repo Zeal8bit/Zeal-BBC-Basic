@@ -26,7 +26,8 @@ for name in ('ACCS', 'BUFFER', 'STAVAR', 'USER'):
     require(symbols[name] % 256 == 0, name + ' must be page aligned')
 require(symbols['INCREM'] < symbols['STAVAR'] + 256, 'cold-start variable purge is too short')
 regions = [('ACCS', 256), ('BUFFER', 256), ('STAVAR', 256),
-           ('D_ORIGINAL_FONT', 3072), ('G_SPANS', 800), ('D_PARAMS', 9),
+           ('D_ORIGINAL_FONT', 3072), ('G_SPANS', 800),
+           ('DISPLAY_SCRATCH', symbols['DISPLAY_SCRATCH_SIZE']), ('D_PARAMS', 9),
            ('D_GLYPH', 12), ('D_CURSOR', 2), ('FILE_CHANNELS', 128),
            ('OPTVAL', 1), ('KEY_QUEUE', 16), ('KEY_EVENTS', 64), ('ZOS_BUFFER', symbols['ZOS_STAT_SIZE'])]
 previous_end = symbols['__tail']
@@ -34,7 +35,13 @@ for name, length in regions:
     require(previous_end <= symbols[name], name + ' overlaps preceding region')
     previous_end = symbols[name] + length
 require(previous_end == symbols['WORKSPACE_END'], 'workspace end disagrees with buffers')
-for name in ('VIDEO_ACCESS_END', 'IRQ_RETURN', 'ZOS_SYSCALL'):
+for name in ('VIDEO_ACCESS_END', 'V_SPAN_INK', 'V_SPAN_OP', 'IRQ_RETURN', 'ZOS_SYSCALL'):
     require(symbols[name] < 0x8000, name + ' must remain below the video mapping')
 print(f'Image {size} bytes; runtime workspace '
       f'{symbols["USER"] - symbols["WORKSPACE_BASE"]} bytes; PAGE=&{symbols["USER"]:04X}')
+
+page_limit = 16 * 1024
+if size > page_limit:
+    print(f'16 KiB page target: {size - page_limit} bytes over (optimization goal)')
+else:
+    print(f'16 KiB page target: {page_limit - size} bytes spare')

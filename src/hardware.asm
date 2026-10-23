@@ -113,49 +113,22 @@ PUTIMS:
         defm "Not implemented"
         defb 0
 
-        PUBLIC V_READ, V_WRITE, V_SPAN, D_VREAD, D_VWRITE, VIDEO_ACCESS_END
-; Temporary video mapping in virtual page 2. These helpers and the private
-; IRQ wrappers must stay below &8000 (checked by the build). The kernel ROM,
-; stack and vectors remain mapped, so interrupts remain enabled while drawing.
-; No OS call or access to upper BASIC code/workspace occurs before restoration.
-; DE=16-bit address within pixel storage (physical &110000).
+        PUBLIC V_READ, V_WRITE, V_SPAN, V_PAINT, V_ADDRESS, V_TEXT_ADDRESS
+        PUBLIC D_VREAD, D_VWRITE, VIDEO_ACCESS_END
+; Map virtual page 2 only while running below &8000. No OS calls or runtime
+; workspace accesses are permitted until its original mapping is restored.
+; The private IRQ wrappers also stay below &8000; interrupts remain enabled.
 V_READ:
         push bc
         push hl
-        ld a,0x80
-        in a,(0xf0)
-        ld c,a
-        ld a,d
-        rlca
-        rlca
-        and 3
-        add a,0x44
-        out (0xf2),a
-        ld a,d
-        and 0x3f
-        or 0x80
-        ld h,a
-        ld l,e
+        call V_MAP
         ld b,(hl)
-        jp V_RETURN
+        jr V_RETURN
 V_WRITE:
         push bc
         ld b,a
         push hl
-        ld a,0x80
-        in a,(0xf0)
-        ld c,a
-        ld a,d
-        rlca
-        rlca
-        and 3
-        add a,0x44
-        out (0xf2),a
-        ld a,d
-        and 0x3f
-        or 0x80
-        ld h,a
-        ld l,e
+        call V_MAP
         ld (hl),b
 V_RETURN:
         ld a,c
@@ -164,19 +137,11 @@ V_RETURN:
         pop hl
         pop bc
         ret
-; Fill BC pixels from DE with A, in chunks that never cross a mapping
-; boundary. Interrupts can run throughout; poll for Escape between scanlines.
-V_SPAN:
-        ld (V_SPAN_INK),a
-V_SPAN_NEXT:
-        ld a,b
-        or c
-        ret z
-        push bc
-        push de
+; DE=offset in pixel storage. Return HL=mapped pointer, C=original page.
+V_MAP:
         ld a,0x80
         in a,(0xf0)
-        ld (V_SPAN_PAGE),a
+        ld c,a
         ld a,d
         rlca
         rlca
@@ -188,72 +153,109 @@ V_SPAN_NEXT:
         or 0x80
         ld h,a
         ld l,e
+        ret
+; DE=VRAM offset, BC=count, A=ink. V_PAINT also takes L=0/1/2/3 for
+; replace/OR/AND/XOR. Work in <=64-byte chunks that cannot cross MMU pages.
+; Only the two bytes below are accessed while mapped; keep them below &8000.
+V_SPAN:
+        ld l,0
+V_PAINT:
+        ld (V_SPAN_INK),a
+        ld a,l
+        ld (V_SPAN_OP),a
+V_SPAN_NEXT:
+        ld a,b
+        or c
+        ret z
+        push bc
+        push de
         ld a,64
         sub e
         and 63
-        jp nz,V_SPAN_BOUND
+        jr nz,V_SPAN_BOUND
         ld a,64
 V_SPAN_BOUND:
-        ld d,a
+        ld h,a
         ld a,b
         or a
-        ld a,d
-        jp nz,V_SPAN_COUNT
+        ld a,h
+        jr nz,V_SPAN_COUNT
         cp c
-        jp c,V_SPAN_COUNT
+        jr c,V_SPAN_COUNT
         ld a,c
 V_SPAN_COUNT:
-        ld (V_SPAN_COUNTED),a
         ld b,a
+        call V_MAP
+        ld e,b                 ; count survives the pixel loop
+        ld a,(V_SPAN_OP)
+        or a
+        jr z,V_SPAN_REPLACE
+        dec a
+        jr z,V_SPAN_OR
+        dec a
+        jr z,V_SPAN_AND
+V_SPAN_XOR:
+        ld a,(V_SPAN_INK)
+        xor (hl)
+        ld (hl),a
+        inc hl
+        djnz V_SPAN_XOR
+        jr V_SPAN_RESTORE
+V_SPAN_AND:
+        ld a,(V_SPAN_INK)
+        and (hl)
+        ld (hl),a
+        inc hl
+        djnz V_SPAN_AND
+        jr V_SPAN_RESTORE
+V_SPAN_OR:
+        ld a,(V_SPAN_INK)
+        or (hl)
+        ld (hl),a
+        inc hl
+        djnz V_SPAN_OR
+        jr V_SPAN_RESTORE
+V_SPAN_REPLACE:
         ld a,(V_SPAN_INK)
 V_SPAN_LOOP:
         ld (hl),a
         inc hl
         djnz V_SPAN_LOOP
-        ld a,(V_SPAN_PAGE)
+V_SPAN_RESTORE:
+        ld a,c
         out (0xf2),a
+        ld a,e
         pop de
         pop bc
-        ld a,(V_SPAN_COUNTED)
         ld l,a
         ld h,0
         add hl,de
         ex de,hl
-        ld a,(V_SPAN_COUNTED)
-        ld l,a
-        ld h,0
-        push de
-        ld d,b
-        ld e,c
-        ex de,hl
-        or a
-        sbc hl,de
-        ld b,h
-        ld c,l
-        pop de
-        jp V_SPAN_NEXT
+        ld h,a
+        ld a,c
+        sub h
+        ld c,a
+        ld a,b
+        sbc a,0
+        ld b,a
+        jr V_SPAN_NEXT
 V_SPAN_INK: defb 0
-V_SPAN_PAGE: defb 0
-V_SPAN_COUNTED: defb 0
-; VRAM control/font access at physical 0x100000, protected like pixels.
+V_SPAN_OP: defb 0
+; VRAM control/font access at physical &100000.
 D_VREAD:
         push bc
         push hl
-        ld a,0x80
-        in a,(0xf0)
-        ld c,a
-        ld a,0x40
-        out (0xf2),a
-        ld a,d
-        or 0x80
-        ld h,a
-        ld l,e
+        call D_VMAP
         ld b,(hl)
         jp V_RETURN
 D_VWRITE:
         push bc
         ld b,a
         push hl
+        call D_VMAP
+        ld (hl),b
+        jp V_RETURN
+D_VMAP:
         ld a,0x80
         in a,(0xf0)
         ld c,a
@@ -263,6 +265,37 @@ D_VWRITE:
         or 0x80
         ld h,a
         ld l,e
-        ld (hl),b
-        jp V_RETURN
+        ret
 VIDEO_ACCESS_END:
+; Shared address arithmetic, DE=x and HL=y. Carry is clear on return.
+V_ADDRESS:
+        push de
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ex de,hl
+        ld h,l
+        ld l,0
+        jr V_ADDRESS_ADD
+V_TEXT_ADDRESS:
+        push de
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,hl
+V_ADDRESS_ADD:
+        add hl,de
+        pop de
+        add hl,de
+        ex de,hl
+        or a
+        ret

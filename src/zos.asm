@@ -39,6 +39,7 @@
         EXTERN	ERRLIN
         EXTERN D_BYTE, D_ACTIVE, D_EXIT, D_RESET_SEQUENCE
         EXTERN FILE_CHANNELS, OPTVAL, KEY_QUEUE, KEY_EVENTS, ZOS_BUFFER
+        EXTERN G_RESET
         PUBLIC RAW_WRCH
         EXTERN	USER
 
@@ -82,6 +83,7 @@ OSINIT:
         push bc
         push de
         call IRQ_INIT
+        call G_RESET
         pop de
         pop bc
         xor a
@@ -189,25 +191,6 @@ SYSCALL_UNWRAPPED:
         pop af
         rst 0x08
         ret
-
-;PTEXT - Print text
-;   Inputs: HL = address of text
-;            B = number of characters to print
-; Destroys: A,B,H,L,F
-;
-CPTEXT:
-        push de
-        push bc
-        ; Put buffer in DE
-        ex de, hl
-        ld c, b
-        ld b, 0
-        ld h, DEV_STDOUT
-        BBC_SYSCALL(1)
-        pop bc
-        pop de
-        ret
-
 
 ;OSRDCH - Read from the current input stream (keyboard).
 ;  Outputs: A = character
@@ -716,7 +699,7 @@ FILE_TRANSFER:
         call FILE_CHUNK
         call ZOS_SYSCALL
         or a
-        jp nz, CLOSE_ERROR
+        jr nz, CLOSE_ERROR
         ld a, b
         or c
         jr z, FILE_STALLED       ; EOF before stat size, or no write progress
@@ -733,7 +716,7 @@ FILE_TRANSFER:
         jr FILE_TRANSFER
 FILE_STALLED:
         ld a, ERR_FAILURE
-        jp CLOSE_ERROR
+        jr CLOSE_ERROR
 
 ; BC = min(BC, bytes until next 16KB boundary). Preserve HL and DE.
 FILE_CHUNK:
@@ -783,7 +766,7 @@ OSSAVE:
         call FILE_TRANSFER
         call FILE_CLOSE
         or a
-        jp nz, SHOW_ERROR
+        jr nz, SHOW_ERROR
         ret
 CLOSE_ERROR:
         ; Keep the original failure even when cleanup fails too.
@@ -826,15 +809,15 @@ OSSHUT:
         ld h, e
         call FILE_CLOSE
         or a
-        jp nz, SHOW_ERROR
+        jr nz, SHOW_ERROR
         ret
 CHANNEL_ERROR:
         ld a, ERR_INVALID_FILEDEV
-        jp SHOW_ERROR
+        jr SHOW_ERROR
 CLOSE_ALL:
         call OSCLEAN
         or a
-        jp nz, SHOW_ERROR
+        jr nz, SHOW_ERROR
         ret
 
 ; Best-effort cleanup: attempt every owned close and return the first error in
@@ -1070,7 +1053,7 @@ KEY_EVENT:
         jp z, KEY_MODIFIER
         ld d, 8
         cp KB_RIGHT_CTRL
-        jp z, KEY_MODIFIER
+        jr z, KEY_MODIFIER
         cp KB_CAPS_LOCK
         jp z, KEY_CAPS
         ld a, e
@@ -1121,11 +1104,11 @@ KEY_PUNCTUATION:
         ld hl, KEY_SHIFT_BASE
         ld bc, KEY_SHIFT_SIZE
         cpir
-        jp nz, KEY_ENQUEUE
+        jr nz, KEY_ENQUEUE
         ld de, KEY_SHIFTED - KEY_SHIFT_BASE - 1
         add hl, de
         ld a, (hl)
-        jp KEY_ENQUEUE
+        jr KEY_ENQUEUE
 KEY_KEYPAD:
         sub KB_NUMPAD_0
         cp 16
@@ -1135,7 +1118,7 @@ KEY_KEYPAD:
         ld hl, KEY_PAD_ASCII
         add hl, de
         ld a, (hl)
-        jp KEY_ENQUEUE
+        jr KEY_ENQUEUE
 KEY_MODIFIER:
         ld a, e
         or a

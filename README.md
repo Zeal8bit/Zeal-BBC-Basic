@@ -60,7 +60,10 @@ completion leaves it visible; `*BYE` restores the OS text display, default palet
 and original font. BASIC's program start (`PAGE`) is now calculated from the
 interpreter and workspace size, rather than fixed at `&8000`; do not hard-code it.
 Workspace is reserved at startup above the loaded image, without zero-filled
-buffers in the binary. The build checks this separation and available BASIC RAM.
+buffers in the binary. The build checks this separation and available BASIC RAM,
+and reports progress against the 16 KiB executable-size goal. The goal is informational while the
+complete port exceeds one page; the original interpreter and assembler are
+retained.
 
 Supported graphics commands are `GCOL action,colour`, `MOVE`, `DRAW`,
 `PLOT operation,x,y`, `CLG`, and `POINT(x,y)`. Coordinates use BBC's 1280x1024
@@ -72,8 +75,8 @@ the ZVB raster: x/4 and 199-floor(floor(y/4)*25/32). Original BBC pixel grids,
 aspect ratios, and timing are approximated; high-resolution details can merge.
 
 PLOT families 0–63 (solid/dotted lines with endpoint omission), 64–71 (points),
-72–79 (horizontal fill bounded by foreground), 80–87 (filled triangles), and
-96–103 (filled rectangles) are supported. Low bits retain BBC relative/absolute,
+72–79 (horizontal fill bounded by non-background pixels), 80–87 (filled triangles),
+and 96–103 (filled rectangles) are supported. Low bits retain BBC relative/absolute,
 move, foreground, inverse, and background meanings. Other families raise trappable
 error 255, `Unsupported display operation`.
 

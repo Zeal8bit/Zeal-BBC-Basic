@@ -119,3 +119,12 @@ with display-owned echo, POS/VPOS in text mode, repeated mode changes, Escape in
 bitmap mode, and restoration of the shell's text display. Blocking raw reads are
 used while waiting for display input; nonblocking raw mode is restored before
 echo or drawing, so scrolling and Escape polling cannot block on a key.
+
+Size optimizations preserve the original interpreter modules. Graphics checks
+compare line pixels against a wide-integer reference across all supported line
+styles, both directions, and extreme signed endpoints. They also verify fills
+bounded by a different colour, asymmetric glyphs in every bitmap mode,
+transparent XOR text, video spans crossing MMU pages with an interrupt pending,
+and cold-start initialization of graphics state in poisoned runtime RAM.
+The span writer keeps its two mapped-access bytes below &8000; all relocated
+video state and scratch are checked as a separate runtime workspace region.

@@ -786,6 +786,114 @@ static int point(int x, int y) {
 static void vdu(const uint8_t *bytes, unsigned count) {
     for (unsigned i=0;i<count;i++) display_byte(bytes[i]);
 }
+/* Compare visible pixels with a wide-integer reference, including lines
+ * whose off-screen error terms exceed a signed Z80 word when doubled. */
+static void test_line_raster(void) {
+    static const int endpoints[][4] = {
+        {-32768,100,32767,104}, {100,-32768,104,32767},
+        {0,0,1276,1020}, {1276,0,0,1020}, {0,512,1276,512},
+        {640,0,640,1020}, {80,80,80,80}, {0,0,80,40}, {0,0,40,80}
+    };
+    uint8_t expected[64000];
+    for (unsigned i=0;i<sizeof(endpoints)/sizeof(*endpoints);i++) {
+        for (unsigned reverse=0;reverse<2;reverse++) {
+            for (unsigned family=0;family<64;family+=8) {
+                reset("D_MODE"); cpu.a=1; run(); CHECK(!basic_error);
+                const int *p=endpoints[i]; unsigned a=reverse ? 2 : 0, b=reverse ? 0 : 2;
+                plot(4,p[a],p[a+1]); plot(family+5,p[b],p[b+1]);
+                memset(expected,0,sizeof(expected));
+                int x=p[a]>>2, y=199-(((p[a+1]>>2)*25)>>5);
+                int tx=p[b]>>2, ty=199-(((p[b+1]>>2)*25)>>5);
+                int dx=abs(tx-x), dy=-abs(ty-y), sx=x<tx ? 1 : -1, sy=y<ty ? 1 : -1;
+                int error=dx+dy; unsigned step=0;
+                for (;;) {
+                    int last=x==tx && y==ty;
+                    if (!(family&8 && last) && !(family&32 && !step) && !(family&16 && (step&1))
+                        && x>=0 && x<320 && y>=0 && y<200) expected[y*320+x]=3;
+                    if (last) break;
+                    int twice=error*2;
+                    if (twice>=dy) { error+=dy; x+=sx; }
+                    if (twice<=dx) { error+=dx; y+=sy; }
+                    step++;
+                }
+                CHECK(!memcmp(video+0x10000,expected,sizeof(expected)));
+            }
+        }
+    }
+}
+static void test_fill_boundary(void) {
+    reset("D_MODE"); cpu.a=1; run(); CHECK(!basic_error);
+    cpu.a=0; cpu.e=2; invoke("G_COLOUR");
+    plot(4,80,80); plot(5,80,200); plot(4,200,80); plot(5,200,200);
+    cpu.a=0; cpu.e=1; invoke("G_COLOUR"); plot(77,120,120);
+    CHECK(point(40,120)==0 && point(80,120)==2);
+    CHECK(point(120,120)==1 && point(200,120)==2 && point(240,120)==0);
+    /* A seed on an existing non-background pixel must not fill or erase it. */
+    plot(77,80,120); CHECK(point(80,120)==2 && point(40,120)==0);
+}
+static void test_video_spans(void) {
+    const unsigned starts[]={0x3ff7,0x7ff7,0xbff7,0xfff7};
+    for (unsigned action=0;action<4;action++) {
+        for (unsigned i=0;i<4;i++) {
+            unsigned start=starts[i], count=i==3 ? 9 : 73;
+            reset("V_PAINT");
+            for (unsigned x=0;x<65536;x++) video[0x10000+x]=x&3;
+            prepare_keyboard(); inject_interrupt=0; interrupt_during_video=1;
+            cpu.a=2; cpu.l=action; set_de(start); set_bc(count); run();
+            check_alternates(); CHECK(interrupt_seen && cpu.mmu.pages[2]==2);
+            for (unsigned x=start-1;x<start+count+(i==3 ? 0 : 1);x++) {
+                unsigned old=x&3, want=old;
+                if (x>=start && x<start+count)
+                    want=action==0 ? 2 : action==1 ? old|2 : action==2 ? old&2 : old^2;
+                CHECK(video[0x10000+x]==want);
+            }
+        }
+    }
+    reset("V_PAINT"); cpu.a=2; cpu.l=3; set_de(0xffff); set_bc(0); run();
+    CHECK(!video_accesses && cpu.mmu.pages[2]==2);
+}
+static void test_glyph_raster(void) {
+    const unsigned modes[]={0,1,2,4,5}, widths[]={4,8,16,8,16};
+    const uint8_t glyph[]={0x81,0x42,0x24,0x18,0x81,0xff,0x55,0xaa};
+    const unsigned sampled[]={0,2,3,4,5,6};
+    for (unsigned i=0;i<5;i++) {
+        reset("D_MODE"); cpu.a=modes[i]; run(); CHECK(!basic_error);
+        display_byte(23); display_byte(224); vdu(glyph,8);
+        const uint8_t cursor[]={31,1,3}; vdu(cursor,sizeof(cursor)); display_byte(224);
+        unsigned width=widths[i], ink=memory[symbol("D_MASK")];
+        for (unsigned y=18;y<25;y++) {
+            for (unsigned x=width-1;x<=width*2;x++) {
+                unsigned want=0;
+                if (x>=width && x<width*2 && y<24) {
+                    unsigned bit=(x-width)*8/width;
+                    if (glyph[sampled[y-18]] & (0x80>>bit)) want=ink;
+                }
+                CHECK(video[0x10000+y*320+x]==want);
+            }
+        }
+    }
+    reset("D_MODE"); cpu.a=1; run();
+    display_byte(23); display_byte(224); vdu(glyph,8);
+    for (unsigned y=121;y<127;y++) memset(video+0x10000+y*320+40,1,8);
+    cpu.a=3; cpu.e=2; invoke("G_COLOUR"); display_byte(5);
+    for (unsigned pass=0;pass<2;pass++) {
+        plot(4,160,400); display_byte(224);
+        for (unsigned y=0;y<6;y++) for (unsigned x=0;x<8;x++) {
+            unsigned want=pass==0 && (glyph[sampled[y]] & (0x80>>x)) ? 3 : 1;
+            CHECK(video[0x10000+(121+y)*320+40+x]==want);
+        }
+        CHECK((memory[symbol("G_X")]|memory[symbol("G_X")+1]<<8)==192);
+    }
+}
+static void test_runtime_video_state(void) {
+    reset("OSINIT");
+    memset(memory+symbol("DISPLAY_SCRATCH"),0xa5,symbol("DISPLAY_SCRATCH_SIZE"));
+    set_bc(0); run(); CHECK(!basic_error);
+    CHECK(memory[symbol("G_ACTION")]==0 && memory[symbol("G_BG")]==0);
+    for (unsigned i=0;i<16;i++) CHECK(memory[symbol("G_X")+i]==0);
+    CHECK((memory[symbol("G_RIGHT")]|memory[symbol("G_RIGHT")+1]<<8)==1279);
+    CHECK((memory[symbol("G_TOP")]|memory[symbol("G_TOP")+1]<<8)==1023);
+}
 static void test_graphics_semantics(void) {
     uint8_t statement[256];
     unsigned size = tokenize_text("GCOL 0,2:MOVE 0,0:DRAW 80,80:A%=POINT(80,80):B%=POINT(-4,0):END", statement);
@@ -957,6 +1065,11 @@ int main(int argc, char **argv) {
     CHECK((symbol("USER") & 255) == 0); CHECK((symbol("ACCS") & 255) == 0);
     test_display();
     test_graphics_semantics();
+    test_line_raster();
+    test_fill_boundary();
+    test_video_spans();
+    test_glyph_raster();
+    test_runtime_video_state();
     test_graphics_examples();
     test_errors();
     test_loads();

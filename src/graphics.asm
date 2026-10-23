@@ -1,61 +1,27 @@
 ; BBC raster semantics over a 320x200 ZVB indexed bitmap.
 ; All persistent pixels are logical colour indices in VRAM. Palette changes
 ; never rewrite pixels, and POINT and GCOL therefore see the same colours.
+        EXTERN G_ACTION, G_FG, G_BG, G_X, G_Y, G_OLDX
+        EXTERN G_OLDY, G_ORIGIN, G_LEFT, G_BOTTOM, G_RIGHT, G_TOP
+        EXTERN G_CL, G_CT, G_CR, G_CB, G_OP, G_INK
+        EXTERN G_DO, G_AX, G_AY, G_BX, G_BY, G_CX
+        EXTERN G_CY, G_DX, G_DY, G_SX, G_SY, G_ERR
+        EXTERN G_MAJOR, G_DOT, G_FIRST, G_TY
         PUBLIC G_TRANSFORM, G_TEXT_PIXEL, G_ABORT, G_SET_ORIGIN
         PUBLIC G_CLEAR, G_COLOUR, G_PLOT, G_POINT, G_RESET, G_WINDOW
-        PUBLIC G_ORIGIN, G_FG, G_BG, G_ACTION, G_X, G_Y
-        PUBLIC G_LEFT, G_BOTTOM, G_RIGHT, G_TOP
         EXTERN D_BITMAP, D_MASK, D_PARAMS, D_ERROR, D_UNSUPPORTED
         EXTERN G_SPANS
-        EXTERN V_READ, V_WRITE, TRAP
+        EXTERN V_READ, V_PAINT, V_ADDRESS, TRAP
 
-G_ACTION: defb 0
-G_FG: defb 1
-G_BG: defb 0
-G_X: defw 0
-G_Y: defw 0
-G_OLDX: defw 0
-G_OLDY: defw 0
-G_ORIGIN: defw 0,0
-G_LEFT: defw 0
-G_BOTTOM: defw 0
-G_RIGHT: defw 1279
-G_TOP: defw 1023
-G_CL: defw 0
-G_CT: defw 0
-G_CR: defw 319
-G_CB: defw 199
-G_OP: defb 0
-G_INK: defb 0
-G_DO: defb 0
-G_AX: defw 0
-G_AY: defw 0
-G_BX: defw 0
-G_BY: defw 0
-G_CX: defw 0
-G_CY: defw 0
-G_DX: defw 0
-G_DY: defw 0
-G_SX: defw 0
-G_SY: defw 0
-G_ERR: defw 0
-G_E2: defw 0
-G_DOT: defb 0
-G_LAST: defb 0
-G_FIRST: defb 0
 G_RESET:
         xor a
         ld (G_ACTION),a
         ld (G_BG),a
-        ld hl,0
-        ld (G_X),hl
-        ld (G_Y),hl
-        ld (G_OLDX),hl
-        ld (G_OLDY),hl
-        ld (G_ORIGIN),hl
-        ld (G_ORIGIN+2),hl
-        ld (G_LEFT),hl
-        ld (G_BOTTOM),hl
+        ld hl,G_X
+        ld de,G_X+1
+        ld bc,G_RIGHT-G_X-1
+        ld (hl),a
+        ldir                   ; X/Y, history, origin and window minimums
         ld a,(D_MASK)
         ld (G_FG),a
         ld hl,1279
@@ -70,7 +36,7 @@ G_COLOUR:
         ld a,(D_MASK)
         and e
         bit 7,e
-        jp nz,G_BACKGROUND
+        jr nz,G_BACKGROUND
         ld (G_FG),a
         ret
 G_BACKGROUND:
@@ -81,7 +47,7 @@ G_REQUIRE:
         or a
         ret nz
         jp D_UNSUPPORTED
- ; Changing the origin moves the coordinate axes, not the existing cursor.
+; Changing the origin moves the coordinate axes, not the existing cursor.
 ; Rebase both saved logical positions so the next relative draw/triangle
 ; continues from the same physical screen points.
 G_SET_ORIGIN:
@@ -123,26 +89,30 @@ G_WINDOW:
         ex de,hl
         call G_LESS
         jp c,D_ERROR
-        ld hl,(D_PARAMS)
-        ld (G_LEFT),hl
-        ld hl,(D_PARAMS+2)
-        ld (G_BOTTOM),hl
-        ld hl,(D_PARAMS+4)
-        ld (G_RIGHT),hl
-        ld hl,(D_PARAMS+6)
-        ld (G_TOP),hl
+        ld hl,D_PARAMS
+        ld de,G_LEFT
+        ld bc,8
+        ldir
 G_CLIP_WINDOW:
         ld hl,(G_LEFT)
         call G_SCALE_X
+        ld de,0
+        call G_MAX
         ld (G_CL),hl
         ld hl,(G_RIGHT)
         call G_SCALE_X
+        ld de,319
+        call G_MIN
         ld (G_CR),hl
         ld hl,(G_TOP)
         call G_SCALE_Y
+        ld de,0
+        call G_MAX
         ld (G_CT),hl
         ld hl,(G_BOTTOM)
         call G_SCALE_Y
+        ld de,199
+        call G_MIN
         ld (G_CB),hl
         ret
 ; Signed divide X by four. Y maps the BBC's 256 logical pixel rows to 200.
@@ -211,7 +181,6 @@ G_TRANSFORM:
 G_POINT:
         call G_REQUIRE
         call G_TRANSFORM
-        ld (G_TESTX),de
         call G_ADDRESS
         ld hl,-1
         ret c
@@ -221,76 +190,43 @@ G_POINT:
         ret
 ; DE=x and HL=y in physical coordinates -> DE=VRAM offset, carry if clipped.
 G_ADDRESS:
-        ld (G_TESTX),de
-        bit 7,h
-        jp nz,G_OUT
-        ld a,h
-        or a
-        jp nz,G_OUT
-        ld a,l
-        cp 200
-        jp nc,G_OUT
-        bit 7,d
-        jp nz,G_OUT
+        ; Cached bounds are intersected with the physical screen. An empty
+        ; intersection remains inverted, so these comparisons also reject it.
         push hl
-        ld hl,319
-        or a
-        sbc hl,de
-        pop hl
-        jp c,G_OUT
-        push hl
-        ld hl,(G_CL)
+        ex de,hl
+        ld de,(G_CL)
+        call G_LESS
+        jr c,G_X_OUT
+        ld de,(G_CR)
+        ex de,hl
         call G_LESS
         pop hl
-        jp z,G_ADDR_LEFT_OK
-        jp nc,G_OUT
-G_ADDR_LEFT_OK:
-        push hl
-        ld hl,(G_CR)
-        call G_LESS
-        pop hl
-        jp c,G_OUT
-        push hl
+        jr c,G_OUT
+        push de
         ld de,(G_CT)
         call G_LESS
-        pop hl
-        jp c,G_OUT
-        push hl
+        jr c,G_Y_OUT
         ld de,(G_CB)
         ex de,hl
         call G_LESS
-        pop hl
-        jp c,G_OUT
-        ; X was overwritten during Y checks, recover from caller's scratch.
-        ld de,(G_TESTX)
-        push de
-        ld d,h
-        ld e,l
-        add hl,hl
-        add hl,hl
-        add hl,hl
-        add hl,hl
-        add hl,hl
-        add hl,hl             ; y*64
         ex de,hl
-        ld h,l
-        ld l,0                ; y*256
-        add hl,de
         pop de
-        add hl,de
-        ex de,hl
-        or a
+        jr c,G_OUT
+        jp V_ADDRESS
+G_X_OUT:
+        pop hl
+        scf
         ret
+G_Y_OUT:
+        pop de
 G_OUT:  scf
         ret
-G_TESTX: defw 0
 ; Pixel writer at physical DE=x, HL=y, preserving caller registers.
 G_TEXT_PIXEL:
         ld a,(G_FG)
         ld (G_INK),a
         ld a,(G_ACTION)
         ld (G_DO),a
-        jp G_PIXEL
 G_PIXEL:
         push af
         push bc
@@ -301,75 +237,38 @@ G_PIXEL:
         call nz,G_RECORD
         ld a,(G_EDGE_FLAG)
         or a
-        jp nz,G_PIXEL_DONE
+        jr nz,G_PIXEL_DONE
         call G_ADDRESS
-        jp c,G_PIXEL_DONE
-        ld a,(G_DO)
-        or a
-        jp nz,G_PIXEL_ACTION
-        ld a,(G_INK)
-        call V_WRITE
-        jp G_PIXEL_DONE
-G_PIXEL_ACTION:
-        cp 4
-        jp z,G_INVERT
-        push de
-        call V_READ
-        ld b,a
-        ld a,(G_INK)
-        ld c,a
-        ld a,(G_DO)
-        or a
-        ld a,c
-        jp z,G_STORE
-        ld a,(G_DO)
-        cp 1
-        ld a,c
-        jp z,G_OR
-        ld a,(G_DO)
-        cp 2
-        ld a,c
-        jp z,G_AND
-        xor b
-        jp G_STORE
-G_OR:   or b
-        jp G_STORE
-G_AND:  and b
-G_STORE:
-        ld b,a
-        ld a,(D_MASK)
-        and b
-        pop de
-        call V_WRITE
-        jp G_PIXEL_DONE
-G_INVERT:
-        push de
-        call V_READ
-        ld b,a
-        ld a,(D_MASK)
-        xor b
-        pop de
-        call V_WRITE
+        jr c,G_PIXEL_DONE
+        ld bc,1
+        call G_PAINT
 G_PIXEL_DONE:
         pop hl
         pop de
         pop bc
         pop af
         ret
+; The span writer implements all colour actions. Inversion is XOR with the
+; current logical colour mask, so no read/modify/write implementation is duplicated.
+G_PAINT:
+        ld a,(G_DO)
+        cp 4
+        ld l,a
+        ld a,(G_INK)
+        jp nz,V_PAINT
+        ld l,3
+        ld a,(D_MASK)
+        jp V_PAINT
 G_CLEAR:
         call G_REQUIRE
         ld a,(G_BG)
         ld (G_INK),a
         xor a
         ld (G_DO),a
-        ld hl,(G_CL)
-        ld (G_AX),hl
-        ld hl,(G_CT)
-        ld (G_AY),hl
-        ld hl,(G_CR)
-        ld (G_BX),hl
-        ld hl,(G_CB)
-        ld (G_BY),hl
+        ld hl,G_CL
+        ld de,G_AX
+        ld bc,8
+        ldir                   ; cached rectangle and plot rectangle share X/Y order
         jp G_RECT
 ; PLOT families: 0..63 lines, 64..71 points, 72..79 horizontal fill,
 ; 80..87 triangles, 96..103 rectangles. Low bits retain BBC meanings.
@@ -380,21 +279,17 @@ G_PLOT:
         call G_REQUIRE
         ld a,(G_OP)
         cp 88
-        jp c,G_VALID_LOW
+        jr c,G_VALID_LOW
         cp 96
         jp c,D_UNSUPPORTED
         cp 104
         jp nc,D_UNSUPPORTED
 G_VALID_LOW:
-        ld a,(G_OP)
-        and 0xf8
-        cp 88
-        jp z,D_UNSUPPORTED
         pop hl
         pop de
         ld a,(G_OP)
         bit 2,a
-        jp nz,G_ABSOLUTE
+        jr nz,G_ABSOLUTE
         push hl
         ld hl,(G_X)
         add hl,de
@@ -430,25 +325,25 @@ G_ABSOLUTE:
         and 3
         ret z                  ; MOVE updates history without drawing
         cp 2
-        jp z,G_USE_INVERSE
+        jr z,G_USE_INVERSE
         cp 3
         ld a,(G_BG)
-        jp z,G_USE_INK
+        jr z,G_USE_INK
         ld a,(G_FG)
 G_USE_INK:
         ld (G_INK),a
         ld a,(G_ACTION)
         ld (G_DO),a
-        jp G_DISPATCH
+        jr G_DISPATCH
 G_USE_INVERSE:
         ld a,4
         ld (G_DO),a
 G_DISPATCH:
         ld a,(G_OP)
         cp 64
-        jp c,G_LINE
+        jr c,G_LINE
         cp 72
-        jp nc,G_DISPATCH_FILL
+        jr nc,G_DISPATCH_FILL
         ld de,(G_BX)
         ld hl,(G_BY)
         jp G_PIXEL
@@ -473,119 +368,124 @@ G_LESS:
         pop de
         pop hl
         ret
-; General Bresenham line with signed off-screen endpoints; writes are clipped.
+; Major-axis Bresenham. Physical endpoints fit signed 14 bits, but doubling
+; the old signed error could overflow. This accumulator stays within the major
+; delta; carry from subtraction selects the minor step. DE/HL hold X/Y and BC
+; counts remaining steps. G_PIXEL and TRAP preserve all three register pairs.
 G_LINE:
         ld hl,(G_BX)
         ld de,(G_AX)
-        call G_LESS
-        ld bc,1
-        jp nc,G_LINE_XPOS
-        ld bc,-1
-        ex de,hl
-G_LINE_XPOS:
+        call G_DELTA
         ld (G_SX),bc
-        or a
-        sbc hl,de
         ld (G_DX),hl
         ld hl,(G_BY)
         ld de,(G_AY)
-        call G_LESS
-        ld bc,1
-        jp nc,G_LINE_YPOS
-        ld bc,-1
-        ex de,hl
-G_LINE_YPOS:
+        call G_DELTA
         ld (G_SY),bc
-        or a
-        sbc hl,de
         ex de,hl
-        ld hl,0
-        sbc hl,de
-        ld (G_DY),hl
-        ld de,(G_DX)
-        add hl,de
+        ld hl,(G_DX)
+        call G_LESS
+        ld a,0
+        jr nc,G_LINE_MAJOR
+        ex de,hl
+        inc a
+G_LINE_MAJOR:
+        ld (G_MAJOR),a
+        ld (G_DX),hl           ; major delta
+        ld (G_DY),de           ; minor delta
+        ld b,h
+        ld c,l
+        dec hl                 ; ties step the minor axis, like BBC lines
+        srl h
+        rr l
         ld (G_ERR),hl
         xor a
         ld (G_DOT),a
         inc a
         ld (G_FIRST),a
-G_LINE_LOOP:
-        ld hl,(G_AX)
-        ld de,(G_BX)
-        or a
-        sbc hl,de
-        ld a,h
-        or l
-        jp nz,G_NOT_LAST
+        ld de,(G_AX)
         ld hl,(G_AY)
-        ld de,(G_BY)
-        or a
-        sbc hl,de
-        ld a,h
-        or l
-G_NOT_LAST:
-        ld (G_LAST),a
+G_LINE_LOOP:
         ld a,(G_OP)
         bit 3,a
-        jp z,G_LINE_DOT
-        ld a,(G_LAST)
-        or a
-        jp z,G_LINE_SKIP
+        jr z,G_LINE_DOT
+        ld a,b
+        or c
+        jr z,G_LINE_SKIP
 G_LINE_DOT:
         ld a,(G_FIRST)
         or a
-        jp z,G_LINE_PATTERN
+        jr z,G_LINE_PATTERN
         ld a,(G_OP)
         bit 5,a
-        jp nz,G_LINE_SKIP
+        jr nz,G_LINE_SKIP
 G_LINE_PATTERN:
         ld a,(G_OP)
         bit 4,a
-        jp z,G_LINE_DRAW
+        jr z,G_LINE_DRAW
         ld a,(G_DOT)
         and 1
-        jp nz,G_LINE_SKIP
+        jr nz,G_LINE_SKIP
 G_LINE_DRAW:
-        ld de,(G_AX)
-        ld hl,(G_AY)
         call G_PIXEL
 G_LINE_SKIP:
+        ld a,b
+        or c
+        ret z
         xor a
         ld (G_FIRST),a
-        ld a,(G_LAST)
-        or a
-        ret z
         ld a,(G_DOT)
         inc a
         ld (G_DOT),a
         call TRAP
+        push hl
+        push de
         ld hl,(G_ERR)
-        add hl,hl
-        ld (G_E2),hl
         ld de,(G_DY)
-        call G_LESS
-        jp c,G_LINE_ONLY_Y
-        ld hl,(G_ERR)
-        add hl,de
-        ld (G_ERR),hl
-        ld hl,(G_AX)
-        ld de,(G_SX)
-        add hl,de
-        ld (G_AX),hl
-G_LINE_ONLY_Y:
-        ld hl,(G_DX)
-        ld de,(G_E2)
-        call G_LESS
-        jp c,G_LINE_LOOP
-        ld hl,(G_ERR)
+        or a
+        sbc hl,de
+        jr nc,G_LINE_ERROR
         ld de,(G_DX)
-        add hl,de
+        add hl,de              ; wrap restores the error and leaves carry set
+G_LINE_ERROR:
         ld (G_ERR),hl
-        ld hl,(G_AY)
+        pop de
+        pop hl
+        call c,G_STEP_MINOR
+        call G_STEP_MAJOR
+        dec bc
+        jr G_LINE_LOOP
+G_DELTA:
+        call G_LESS
+        ld bc,1
+        jr nc,G_DELTA_POSITIVE
+        ld bc,-1
+        ex de,hl
+G_DELTA_POSITIVE:
+        or a
+        sbc hl,de
+        ret
+G_STEP_MINOR:
+        ld a,(G_MAJOR)
+        xor 1
+        jr G_STEP_AXIS
+G_STEP_MAJOR:
+        ld a,(G_MAJOR)
+G_STEP_AXIS:
+        or a
+        jr nz,G_STEP_Y
+        push hl
+        ld hl,(G_SX)
+        add hl,de
+        ex de,hl
+        pop hl
+        ret
+G_STEP_Y:
+        push de
         ld de,(G_SY)
         add hl,de
-        ld (G_AY),hl
-        jp G_LINE_LOOP
+        pop de
+        ret
 ; Inclusive rectangle, sorted and clamped before looping. Also used by CLG.
 G_RECT:
         ld hl,(G_AX)
@@ -600,26 +500,18 @@ G_RECT:
         ld (G_BY),de
         ; Clip spans before iterating, including extreme signed coordinates.
         ld hl,(G_AX)
-        ld de,0
-        call G_MAX
         ld de,(G_CL)
         call G_MAX
         ld (G_AX),hl
         ld hl,(G_BX)
-        ld de,319
-        call G_MIN
         ld de,(G_CR)
         call G_MIN
         ld (G_BX),hl
         ld hl,(G_AY)
-        ld de,0
-        call G_MAX
         ld de,(G_CT)
         call G_MAX
         ld (G_AY),hl
         ld hl,(G_BY)
-        ld de,199
-        call G_MIN
         ld de,(G_CB)
         call G_MIN
         ld (G_BY),hl
@@ -631,92 +523,82 @@ G_RECT_ROW:
         ld hl,(G_AY)
         ld de,(G_BY)
         call G_LESS
-        jp c,G_RECT_RUN
+        jr c,G_RECT_RUN
         or a
         sbc hl,de
         ret nz
 G_RECT_RUN:
-        ld hl,(G_AX)
-        ld (G_RX),hl
-G_RECT_COL:
-        ld de,(G_RX)
+        ld de,(G_AX)
         ld hl,(G_AY)
-        call G_PIXEL
-        ld hl,(G_RX)
-        ld de,(G_BX)
+        call V_ADDRESS
+        push de
+        ld hl,(G_BX)
+        ld de,(G_AX)
         or a
         sbc hl,de
-        jp z,G_RECT_NEXT
-        ld hl,(G_RX)
         inc hl
-        ld (G_RX),hl
-        jp G_RECT_COL
+        ld b,h
+        ld c,l
+        pop de
+        call G_PAINT
 G_RECT_NEXT:
         call TRAP
         ld hl,(G_AY)
         inc hl
         ld (G_AY),hl
-        jp G_RECT_ROW
-G_RX: defw 0
+        jr G_RECT_ROW
 G_MAX:  call G_LESS
         ret nc
         ex de,hl
         ret
-G_MIN:  call G_LESS
-        ret c
-        ex de,hl
-        ret
+G_MIN:
 G_SORT: call G_LESS
         ret c
         ex de,hl
         ret
-; Horizontal fill: extend left/right through non-foreground pixels, stopping
-; at foreground or the graphics window. Family 72 is bounded by foreground.
+; PLOT family 72 fills background pixels, stopping at any other colour.
 G_HORIZONTAL_FILL:
         ld de,(G_BX)
-        ld (G_TESTX),de
         ld hl,(G_BY)
         call G_ADDRESS
         ret c
         call V_READ
         ld b,a
-        ld a,(G_FG)
+        ld a,(G_BG)
         cp b
-        ret z
+        ret nz
         ld hl,(G_BX)
         ld (G_AX),hl
 G_FILL_LEFT:
         ld de,(G_AX)
         dec de
-        ld (G_TESTX),de
         ld hl,(G_BY)
         call G_ADDRESS
-        jp c,G_FILL_RIGHT
+        jr c,G_FILL_RIGHT
         call V_READ
         ld b,a
-        ld a,(G_FG)
+        ld a,(G_BG)
         cp b
-        jp z,G_FILL_RIGHT
+        jr nz,G_FILL_RIGHT
         ld hl,(G_AX)
         dec hl
         ld (G_AX),hl
-        jp G_FILL_LEFT
+        jr G_FILL_LEFT
 G_FILL_RIGHT:
         ld de,(G_BX)
         inc de
-        ld (G_TESTX),de
         ld hl,(G_BY)
         call G_ADDRESS
-        jp c,G_FILL_DRAW
+        jr c,G_FILL_DRAW
         call V_READ
         ld b,a
-        ld a,(G_FG)
+        ld a,(G_BG)
         cp b
-        jp z,G_FILL_DRAW
+        jr nz,G_FILL_DRAW
         ld hl,(G_BX)
         inc hl
         ld (G_BX),hl
-        jp G_FILL_RIGHT
+        jr G_FILL_RIGHT
 G_FILL_DRAW:
         ld hl,(G_BY)
         ld (G_AY),hl
@@ -737,33 +619,26 @@ G_TRI_INIT:
         ld (hl),0x80
         inc hl
         djnz G_TRI_INIT
+        ld b,3
+G_TRI_EDGE:
+        push bc
+        call G_EDGE
+        ; Line stepping now leaves its endpoints intact. Rotate A/B/C after
+        ; each edge, so AB, BC and CA share one loop and no saved vertices.
         ld hl,(G_AX)
-        ld (G_TAX),hl
+        push hl
         ld hl,(G_AY)
-        ld (G_TAY),hl
-        ld hl,(G_BX)
-        ld (G_TBX),hl
-        ld hl,(G_BY)
-        ld (G_TBY),hl
-        call G_EDGE
-        ld hl,(G_TBX)
-        ld (G_AX),hl
-        ld hl,(G_TBY)
-        ld (G_AY),hl
-        ld hl,(G_CX)
-        ld (G_BX),hl
-        ld hl,(G_CY)
-        ld (G_BY),hl
-        call G_EDGE
-        ld hl,(G_CX)
-        ld (G_AX),hl
-        ld hl,(G_CY)
-        ld (G_AY),hl
-        ld hl,(G_TAX)
-        ld (G_BX),hl
-        ld hl,(G_TAY)
-        ld (G_BY),hl
-        call G_EDGE
+        push hl
+        ld hl,G_BX
+        ld de,G_AX
+        ld bc,8
+        ldir
+        pop hl
+        ld (G_CY),hl
+        pop hl
+        ld (G_CX),hl
+        pop bc
+        djnz G_TRI_EDGE
         ld hl,0
         ld (G_TY),hl
 G_TRI_ROW:
@@ -782,12 +657,12 @@ G_TRI_ROW:
         ld l,a
         ex de,hl
         call G_LESS
-        jp c,G_TRI_SPAN
+        jr c,G_TRI_SPAN
         push hl
         or a
         sbc hl,de
         pop hl
-        jp nz,G_TRI_NEXT
+        jr nz,G_TRI_NEXT
 G_TRI_SPAN:
         ld (G_AX),hl
         ld (G_BX),de
@@ -801,13 +676,8 @@ G_TRI_NEXT:
         ld (G_TY),hl
         ld a,l
         cp 200
-        jp c,G_TRI_ROW
+        jr c,G_TRI_ROW
         ret
-G_TAX: defw 0
-G_TAY: defw 0
-G_TBX: defw 0
-G_TBY: defw 0
-G_TY: defw 0
 G_EDGE:
         ; Reuse line stepping with a private edge flag; G_PIXEL records spans.
         ld a,1
@@ -848,7 +718,7 @@ G_RECORD:
         ld l,c
         call G_LESS
         pop hl
-        jp c,G_RECORD_MAX
+        jr c,G_RECORD_MAX
         ld (hl),e
         inc hl
         ld (hl),d
