@@ -308,21 +308,14 @@ OSWRCH:
         pop bc
         pop af
         ret
+; Only reached through the register-preserving OSWRCH/VDU boundary.
 RAW_WRCH:
-        ld (ZOS_BUFFER), a
-        push af
-        push bc
-        push de
-        push hl
-        ld h, DEV_STDOUT
-        ld de, ZOS_BUFFER
-        ld bc, 1
-        BBC_SYSCALL(1)
-        pop hl
-        pop de
-        pop bc
-        pop af
-        ret
+        ld (ZOS_BUFFER),a
+        ld h,DEV_STDOUT
+        ld de,ZOS_BUFFER
+        ld bc,1
+        ld l,1
+        jp ZOS_SYSCALL
 
 ;OSLINE - Read a bounded LF-terminated line into a 256-byte buffer.
 ; HL addresses the buffer (L=0). A=0 on success; errors are trappable.

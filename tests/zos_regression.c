@@ -894,6 +894,65 @@ static void test_runtime_video_state(void) {
     CHECK((memory[symbol("G_RIGHT")]|memory[symbol("G_RIGHT")+1]<<8)==1279);
     CHECK((memory[symbol("G_TOP")]|memory[symbol("G_TOP")+1]<<8)==1023);
 }
+static void test_scaled_coordinates(void) {
+    reset("G_SCALE_Y");
+    for (int y=-32768;y<=32767;y+=37) {
+        int row=y>=0 ? y/4 : (y-3)/4;
+        int product=row*25;
+        int expected=199-(product>=0 ? product/32 : (product-31)/32);
+        set_hl((uint16_t)y); invoke("G_SCALE_Y");
+        CHECK((int16_t)(cpu.h<<8|cpu.l)==expected);
+    }
+    set_hl(32767); invoke("G_SCALE_Y"); CHECK((int16_t)(cpu.h<<8|cpu.l)==-6200);
+}
+static void test_text_window_rectangles(void) {
+    const unsigned widths[]={4,8,16,1,8,16,1};
+    for (unsigned mode=0;mode<7;mode++) {
+        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        const uint8_t window[]={28,3,6,5,2}, cursor[]={31,1,1};
+        vdu(window,sizeof(window)); vdu(cursor,sizeof(cursor));
+        invoke("D_WINDOW_RECT"); CHECK(!basic_error);
+        CHECK(memory[symbol("D_X")]==4 && memory[symbol("D_Y")]==3);
+        unsigned bitmap=mode!=3 && mode!=6, width=widths[mode];
+        unsigned left=3*width, right=6*width-1;
+        unsigned top=bitmap ? 12 : 2, bottom=bitmap ? 42 : 6;
+        CHECK((memory[symbol("D_L")]|memory[symbol("D_L")+1]<<8)==left);
+        CHECK((memory[symbol("D_R")]|memory[symbol("D_R")+1]<<8)==right);
+        CHECK((memory[symbol("D_T")]|memory[symbol("D_T")+1]<<8)==top);
+        CHECK((memory[symbol("D_B")]|memory[symbol("D_B")+1]<<8)==bottom);
+        unsigned base=bitmap ? 0x10000 : 0, stride=bitmap ? 320 : 80;
+        memset(video+base,7,bitmap ? 64000 : 3200);
+        invoke("D_CLEAR"); CHECK(!basic_error);
+        for (unsigned y=top-1;y<=bottom+1;y++) {
+            for (unsigned x=left-1;x<=right+1;x++) {
+                unsigned want=(x>=left && x<=right && y>=top && y<=bottom) ? (bitmap ? 0 : 32) : 7;
+                CHECK(video[base+y*stride+x]==want);
+            }
+        }
+        invoke("GETCSR"); CHECK(cpu.e==0 && cpu.l==0);
+    }
+}
+static void test_default_palettes(void) {
+    const unsigned rgb[]={0,0xf800,0x07e0,0xffe0,0x001f,0xf81f,0x07ff,0xffff};
+    for (unsigned mode=0;mode<7;mode++) {
+        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        unsigned mask=memory[symbol("D_MASK")];
+        CHECK(memory[symbol("G_ACTION")]==0 && memory[symbol("G_BG")]==0);
+        CHECK(memory[symbol("G_FG")]==mask && memory[symbol("D_FG")]==mask);
+        for (unsigned i=0;i<16;i++) {
+            unsigned want=rgb[i&7];
+            if (mask==1 && i==1) want=0xffff;
+            if (mask==3 && i==2) want=0xffe0;
+            if (mask==3 && i==3) want=0xffff;
+            CHECK((video[0xe00+i*2]|video[0xe01+i*2]<<8)==want);
+        }
+    }
+    reset("D_MODE"); cpu.a=2; run();
+    for (unsigned i=0;i<8;i++) {
+        const uint8_t colour[]={19,15,i,0,0,0}; vdu(colour,sizeof(colour));
+        CHECK((video[0xe1e]|video[0xe1f]<<8)==rgb[i]);
+    }
+}
 static void test_graphics_semantics(void) {
     uint8_t statement[256];
     unsigned size = tokenize_text("GCOL 0,2:MOVE 0,0:DRAW 80,80:A%=POINT(80,80):B%=POINT(-4,0):END", statement);
@@ -1070,6 +1129,9 @@ int main(int argc, char **argv) {
     test_video_spans();
     test_glyph_raster();
     test_runtime_video_state();
+    test_scaled_coordinates();
+    test_text_window_rectangles();
+    test_default_palettes();
     test_graphics_examples();
     test_errors();
     test_loads();

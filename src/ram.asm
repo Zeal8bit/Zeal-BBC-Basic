@@ -79,8 +79,9 @@ DEFC G_SPANS = D_ORIGINAL_FONT + 3072
 ; graphics state at startup and MODE; scratch is assigned before every use.
         PUBLIC DISPLAY_SCRATCH, DISPLAY_SCRATCH_SIZE
 DEFC DISPLAY_SCRATCH = G_SPANS + 800
-        PUBLIC D_CHAR
-DEFC D_CHAR = DISPLAY_SCRATCH
+        PUBLIC D_NEXT_PARAM, D_CHAR
+DEFC D_NEXT_PARAM = DISPLAY_SCRATCH
+DEFC D_CHAR = D_NEXT_PARAM + 2
         PUBLIC D_GX
 DEFC D_GX = D_CHAR + 1
         PUBLIC D_GY
@@ -97,16 +98,15 @@ DEFC D_BITS = D_GROW + 1
 DEFC D_FILL = D_BITS + 1
         PUBLIC D_L
 DEFC D_L = D_FILL + 1
-        PUBLIC D_T
-DEFC D_T = D_L + 2
-        PUBLIC D_R
-DEFC D_R = D_T + 2
+; Word-sized text bounds retain the VDU left/bottom/right/top byte order.
         PUBLIC D_B
-DEFC D_B = D_R + 2
-        PUBLIC D_CX
-DEFC D_CX = D_B + 2
+DEFC D_B = D_L + 2
+        PUBLIC D_R
+DEFC D_R = D_B + 2
+        PUBLIC D_T
+DEFC D_T = D_R + 2
         PUBLIC D_CY
-DEFC D_CY = D_CX + 2
+DEFC D_CY = D_T + 2
         PUBLIC D_SCROLL_LINE
 DEFC D_SCROLL_LINE = D_CY + 2
         PUBLIC D_SCROLL_BOUNDARY

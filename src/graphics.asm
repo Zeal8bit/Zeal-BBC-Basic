@@ -116,7 +116,7 @@ G_CLIP_WINDOW:
         ld (G_CB),hl
         ret
 ; Signed divide X by four. Y maps the BBC's 256 logical pixel rows to 200.
-; Divide by four, then use quotient/remainder for floor(row*25/32).
+; Divide by four, then calculate floor(row*25/32) with a signed wide product.
 ; This stays in range even for signed coordinates far outside the screen.
 G_SCALE_X:
         sra h
@@ -126,42 +126,40 @@ G_SCALE_X:
         ret
 G_SCALE_Y:
         call G_SCALE_X
-        ld a,l
-        and 31
-        ld c,a
-        ld b,5
-G_YQUOT:
-        sra h
-        rr l
-        djnz G_YQUOT
-        call G_TIMES25
+        ; Signed 24-bit product A:HL = row * 25. Keeping the sign byte avoids
+        ; splitting row into a quotient and remainder for the final /32.
+        ld a,h
+        rla
+        sbc a,a
+        ld b,a
+        ld d,h
+        ld e,l
+        add hl,hl
+        rla
+        add hl,hl
+        rla
+        add hl,hl
+        rla                    ; row * 8
+        push af
         push hl
-        ld l,c
-        ld h,0
-        call G_TIMES25
+        add hl,hl
+        rla                    ; row * 16
+        add hl,de
+        adc a,b                ; row * 17
+        pop de
+        pop bc
+        add hl,de
+        adc a,b                ; row * 25
         ld b,5
 G_YDIV:
-        srl h
+        sra a
+        rr h
         rr l
         djnz G_YDIV
-        pop de
-        add hl,de
         ex de,hl
         ld hl,199
         or a
         sbc hl,de
-        ret
-G_TIMES25:
-        ld d,h
-        ld e,l
-        add hl,hl
-        add hl,hl
-        add hl,hl
-        push hl
-        add hl,hl
-        add hl,de
-        pop de
-        add hl,de
         ret
 ; Transform BBC coordinates DE=x, HL=y (relative to current origin).
 G_TRANSFORM:
@@ -563,43 +561,41 @@ G_HORIZONTAL_FILL:
         call G_ADDRESS
         ret c
         call V_READ
-        ld b,a
-        ld a,(G_BG)
-        cp b
+        ld hl,G_BG
+        cp (hl)
         ret nz
-        ld hl,(G_BX)
-        ld (G_AX),hl
+        push de                ; seed address, restored for the rightward scan
+        ld bc,(G_BX)
 G_FILL_LEFT:
-        ld de,(G_AX)
+        ld hl,(G_CL)
+        or a
+        sbc hl,bc
+        jr z,G_FILL_LEFT_END
+        dec bc
         dec de
-        ld hl,(G_BY)
-        call G_ADDRESS
-        jr c,G_FILL_RIGHT
         call V_READ
-        ld b,a
-        ld a,(G_BG)
-        cp b
-        jr nz,G_FILL_RIGHT
-        ld hl,(G_AX)
-        dec hl
-        ld (G_AX),hl
-        jr G_FILL_LEFT
+        ld hl,G_BG
+        cp (hl)
+        jr z,G_FILL_LEFT
+        inc bc                 ; exclude the non-background boundary pixel
+G_FILL_LEFT_END:
+        ld (G_AX),bc
+        pop de
+        ld bc,(G_BX)
 G_FILL_RIGHT:
-        ld de,(G_BX)
+        ld hl,(G_CR)
+        or a
+        sbc hl,bc
+        jr z,G_FILL_RIGHT_END
+        inc bc
         inc de
-        ld hl,(G_BY)
-        call G_ADDRESS
-        jr c,G_FILL_DRAW
         call V_READ
-        ld b,a
-        ld a,(G_BG)
-        cp b
-        jr nz,G_FILL_DRAW
-        ld hl,(G_BX)
-        inc hl
-        ld (G_BX),hl
-        jr G_FILL_RIGHT
-G_FILL_DRAW:
+        ld hl,G_BG
+        cp (hl)
+        jr z,G_FILL_RIGHT
+        dec bc
+G_FILL_RIGHT_END:
+        ld (G_BX),bc
         ld hl,(G_BY)
         ld (G_AY),hl
         jp G_RECT

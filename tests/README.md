@@ -128,3 +128,6 @@ transparent XOR text, video spans crossing MMU pages with an interrupt pending,
 and cold-start initialization of graphics state in poisoned runtime RAM.
 The span writer keeps its two mapped-access bytes below &8000; all relocated
 video state and scratch are checked as a separate runtime workspace region.
+Additional checks sample signed Y-coordinate scaling across the full input
+range, verify text-window bounds and clearing in all seven modes, and compare
+every default palette entry and BBC physical colour against RGB565 values.

@@ -27,9 +27,10 @@
         EXTERN D_CLEAR, D_SETCURSOR, D_GETCURSOR, D_MODE, D_COLOUR, D_ERROR
         EXTERN G_CLEAR, G_COLOUR, G_PLOT, G_POINT
 
-CLRSCN: jp D_CLEAR
-PUTCSR: jp D_SETCURSOR
-GETCSR: jp D_GETCURSOR
+; Link the original interpreter hooks directly to the Zeal implementations.
+DEFC CLRSCN = D_CLEAR
+DEFC PUTCSR = D_SETCURSOR
+DEFC GETCSR = D_GETCURSOR
 GETIME: ld de,0
         ld hl,0
         ret
