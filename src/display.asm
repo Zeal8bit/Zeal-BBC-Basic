@@ -13,12 +13,12 @@
         PUBLIC D_BYTE, D_CLEAR, D_SETCURSOR, D_GETCURSOR, D_COLOUR
         PUBLIC D_BITMAP, D_ACTIVE, D_X, D_FG, D_BG, D_ERROR, D_UNSUPPORTED
         EXTERN V_READ, V_WRITE, V_SPAN, D_VREAD, D_VWRITE
-        EXTERN V_ADDRESS, V_TEXT_ADDRESS
+        EXTERN V_ADDRESS, V_TEXT_ADDRESS, V_GLYPH_ROW
         PUBLIC D_RESET_SEQUENCE, D_EXIT, D_FILL_RECT
         EXTERN ZOS_SYSCALL, RAW_WRCH, EXTERR, TRAP
         EXTERN G_CLEAR, G_COLOUR, G_PLOT, G_RESET, G_WINDOW, G_SET_ORIGIN
         EXTERN G_X, G_Y, G_ACTION, G_FG, G_BG
-        EXTERN G_TRANSFORM, G_TEXT_PIXEL, G_TEXT_ERASE_PIXEL, G_ABORT
+        EXTERN G_TRANSFORM, G_TEXT_PIXEL, G_TEXT_ERASE_CELL, G_ABORT
 D_ACTIVE: defb 0
 D_BITMAP: defb 0
 D_X: defb 0
@@ -707,29 +707,17 @@ D_GLYPH_BITS:
         ld de,(D_GX)
         ld a,(D_GRAPH_TEXT)
         or a
-        call z,V_ADDRESS       ; opaque rows advance a VRAM pointer directly
+        jr nz,D_GLYPH_TRANSPARENT
+        call V_ADDRESS
+        ld a,(D_BITS)
+        call V_GLYPH_ROW
+        jr D_GLYPH_ROW_DONE
+D_GLYPH_TRANSPARENT:
         ld b,8
 D_GLYPH_COL:
-        ld a,(D_GRAPH_TEXT)
-        or a
-        jr z,D_GLYPH_OPAQUE
-        cp 2
-        jr z,D_GLYPH_ERASE
         ld a,(D_BITS)
         bit 7,a
         call nz,G_TEXT_PIXEL
-        jr D_GLYPH_NEXT
-D_GLYPH_ERASE:
-        call G_TEXT_ERASE_PIXEL
-        jr D_GLYPH_NEXT
-D_GLYPH_OPAQUE:
-        ld a,(D_BITS)
-        bit 7,a
-        ld a,(D_BG)
-        jr z,D_GLYPH_WRITE
-        ld a,(D_FG)
-D_GLYPH_WRITE:
-        call V_WRITE
 D_GLYPH_NEXT:
         inc de
         ld a,(D_BITS)
@@ -737,6 +725,7 @@ D_GLYPH_NEXT:
         ld (D_BITS),a
 D_GLYPH_STEP:
         djnz D_GLYPH_COL
+D_GLYPH_ROW_DONE:
         inc c
         ld a,c
         cp 12
@@ -751,6 +740,12 @@ D_GRAPH_PRINT:
         call G_TRANSFORM
         ld (D_GX),de
         ld (D_GY),hl
+        ld a,(D_GRAPH_TEXT)
+        cp 2
+        jr nz,D_GRAPH_GLYPH
+        call G_TEXT_ERASE_CELL
+        jp D_FORWARD
+D_GRAPH_GLYPH:
         call D_LOAD_GLYPH
         call D_DRAW_GLYPH
         jp D_FORWARD

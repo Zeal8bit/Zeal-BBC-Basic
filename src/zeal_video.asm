@@ -125,7 +125,8 @@ PUTIMS:
         defb 0
 
         PUBLIC V_READ, V_WRITE, V_SPAN, V_PAINT, V_ADDRESS, V_TEXT_ADDRESS
-        PUBLIC D_VREAD, D_VWRITE, VIDEO_ACCESS_END
+        PUBLIC D_VREAD, D_VWRITE, VIDEO_ACCESS_END, V_GLYPH_ROW
+        EXTERN D_FG, D_BG
 ; Map virtual page 2 only while running below &8000. No OS calls or runtime
 ; workspace accesses are permitted until its original mapping is restored.
 ; The private IRQ wrappers also stay below &8000; interrupts remain enabled.
@@ -146,6 +147,40 @@ V_RETURN:
         out (0xf2),a
         ld a,b
         pop hl
+        pop bc
+        ret
+; Opaque native text row: DE=8-byte-aligned VRAM offset, A=glyph bits.
+; Both bitmap strides and text X positions are multiples of eight, so the
+; eight pixels cannot cross a 16K MMU page. Preserve caller row state.
+V_GLYPH_ROW:
+        push bc
+        push de
+        push hl
+        ld b,a
+        ld a,(D_FG)
+        ld h,a
+        ld a,(D_BG)
+        ld l,a
+        push hl               ; fetch workspace colours before mapping
+        call V_MAP
+        pop de                ; D=foreground, E=background
+        ld a,c
+        push af               ; original mapping
+        ld c,8
+V_GLYPH_PIXEL:
+        sla b
+        ld a,e
+        jr nc,V_GLYPH_STORE
+        ld a,d
+V_GLYPH_STORE:
+        ld (hl),a
+        inc hl
+        dec c
+        jr nz,V_GLYPH_PIXEL
+        pop af
+        out (0xf2),a
+        pop hl
+        pop de
         pop bc
         ret
 ; DE=offset in pixel storage. Return HL=mapped pointer, C=original page.

@@ -6,18 +6,18 @@ User Guide*, printed pages 151-154. The reference used here is the
 PDF pages 165-168. Credit and copyright remain with the original author and
 publisher; this is a historical listing, not a newly authored demo.
 
-- [original.bas](original.bas) transcribes the printed game. Wrapped statements
+- [lander_bbc.bas](lander_bbc.bas) transcribes the printed game. Wrapped statements
   are joined onto their numbered lines; typesetting indentation is omitted.
   It retains the missing comma printed on line 8015 and the original BBC modes,
   sound and OS commands. It is a comparison reference, not the Zeal version.
-- [zos.bas](zos.bas) contains the small changes listed below. The flight
+- [lander.bas](lander.bas) contains the small changes listed below. The flight
   equations, fuel consumption, numeric thrust controls and landing criteria
   remain unchanged.
 
 With the repository root shared as HostFS:
 
 ```basic
-LOAD$ "H:/examples/gfx/lander/zos.bas"
+LOAD$ "H:/examples/gfx/lander.bas"
 RUN
 ```
 
@@ -50,7 +50,7 @@ separate written win/lose message; the ZOS version's fanfare is silent.
 
 ## Verification
 
-The real-kernel test loads `zos.bas` with `LOAD$` and runs the actual listing in
+The real-kernel test loads `lander.bas` with `LOAD$` and runs the actual listing in
 the headless native emulator. It first allows an unpowered crash, checking the
 crash graphics loop completes without consuming fuel. It then plays using
 ordinary PS/2 `9` keypresses and checks a successful landing, remaining fuel and

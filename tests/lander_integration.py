@@ -139,7 +139,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='bbc-lander-') as temporary:
         directory = Path(temporary)
         shutil.copy2(args.build_dir / 'bbcbasic.bin', directory / 'bbcbasic')
-        shutil.copy2(ROOT / 'examples/gfx/lander/zos.bas', directory / 'lander.bas')
+        shutil.copy2(ROOT / 'examples/gfx/lander.bas', directory / 'lander.bas')
         shutil.copy2(args.rom, directory / 'rom.img')
         (directory / 'empty.ini').write_text('')
         (directory / 'eeprom.img').write_bytes(b'\xff' * 65536)

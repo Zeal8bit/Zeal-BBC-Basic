@@ -37,7 +37,7 @@ native emulator does not support clipboard paste into the emulated screen.
 Every demo finishes in Zeal's native 80x40 text mode (`MODE 3`). Press Escape
 to interrupt a demo, then enter `MODE 3` to restore text yourself.
 
-For a complete historical game, see [Lunar Lander](lander/README.md). It includes
+For a complete historical game, see [Lunar Lander](lander.md). It includes
 the original BBC listing and a minimally patched ZOS copy for comparison. Unlike
 the small demos above, the game leaves its bitmap visible when it finishes.
 

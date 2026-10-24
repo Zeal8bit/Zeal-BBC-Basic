@@ -95,7 +95,7 @@ Normal interpreted execution and the Lander game sample frequently. This is
 not an independent interrupt-driven clock and does not implement `TIME$`.
 
 An original BBC graphics game with a small, documented Zeal patch is available
-in [examples/gfx/lander](examples/gfx/lander/README.md).
+in [Lunar Lander](examples/gfx/lander.md).
 
 ## BBC graphics and VDU
 

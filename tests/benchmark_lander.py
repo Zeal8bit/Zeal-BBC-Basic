@@ -17,17 +17,17 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def zeal_trial(args, b):
+def zeal_trial(args, b, console_factory=Console):
     with tempfile.TemporaryDirectory(prefix='lander-benchmark-') as temporary:
         directory = Path(temporary)
         shutil.copy2(args.build_dir / 'bbcbasic.bin', directory / 'bbcbasic')
-        shutil.copy2(ROOT / 'examples/gfx/lander/zos.bas', directory / 'lander.bas')
+        shutil.copy2(ROOT / 'examples/gfx/lander.bas', directory / 'lander.bas')
         shutil.copy2(args.rom, directory / 'rom.img')
         (directory / 'empty.ini').write_text('')
         (directory / 'eeprom.img').write_bytes(b'\xff' * 65536)
         with (directory / 'tf.img').open('wb') as stream:
             stream.truncate(4 * 1024 * 1024)
-        c = Console([str(args.emulator.resolve()), '--console', '--debug',
+        c = console_factory([str(args.emulator.resolve()), '--console', '--debug',
                      '--config', str(directory / 'empty.ini'), '--rom', str(directory / 'rom.img'),
                      '--map', str(args.kernel_map.resolve()), '--hostfs', str(directory),
                      '--tf', str(directory / 'tf.img'), '--eeprom', str(directory / 'eeprom.img')], directory)
@@ -74,6 +74,8 @@ def zeal_trial(args, b):
                 cycles = int(re.search(r'cyc=(\d+)', reply)[1])
                 if registers['IY'] == site:
                     timestamps.append(cycles)
+                    if len(timestamps) == 11 and hasattr(c, 'start_profile'):
+                        c.start_profile(b, cycles)
                 # ZOS uses additional INKEY calls to flush input. Exclude them
                 # by counting only the first game's main-input call site.
                 if len(timestamps) == 111:
@@ -81,7 +83,10 @@ def zeal_trial(args, b):
             assert len(timestamps) == 111, 'Insufficient main-loop boundaries'
             cycles = timestamps[110] - timestamps[10]
             seconds = cycles / 10_000_000  # native emulator's fixed CPUFREQ
-            return dict(cycles=cycles, seconds=seconds, updates_per_second=100 / seconds)
+            result = dict(cycles=cycles, seconds=seconds, updates_per_second=100 / seconds)
+            if hasattr(c, 'finish_profile'):
+                result['profile'] = c.finish_profile(cycles)
+            return result
         except Exception:
             print(c.log[-4000:])
             raise
@@ -100,7 +105,7 @@ def main():
     args = p.parse_args()
     process = subprocess.run(['node', str(ROOT / 'tests/benchmark_lander_bbc.mjs'),
                               str(args.jsbeeb.resolve()),
-                              str(ROOT / 'examples/gfx/lander/original.bas')],
+                              str(ROOT / 'examples/gfx/lander_bbc.bas')],
                              capture_output=True, text=True)
     if process.returncode:
         raise RuntimeError(process.stdout + process.stderr)
@@ -121,7 +126,7 @@ def main():
                   binary_sha256=sha256(args.build_dir / 'bbcbasic.bin'),
                   emulator_sha256=sha256(args.emulator), kernel_sha256=sha256(args.rom),
                   kernel_map_sha256=sha256(args.kernel_map),
-                  source_sha256=sha256(ROOT / 'examples/gfx/lander/zos.bas'), runs=runs),
+                  source_sha256=sha256(ROOT / 'examples/gfx/lander.bas'), runs=runs),
         median_updates_per_second=dict(bbc=bbc_rate, zeal=zeal_rate),
         zeal_relative_rate=zeal_rate / bbc_rate,
     )

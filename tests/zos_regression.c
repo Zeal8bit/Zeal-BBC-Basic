@@ -1030,6 +1030,29 @@ static void test_glyph_raster(void) {
         }
     }
 }
+/* Opaque rows either side of a video MMU boundary, with non-default colours.
+ * A glyph can cross pages vertically; each aligned eight-pixel row cannot. */
+static void test_bitmap_glyph_pages(void) {
+    const uint8_t glyph[]={0x81,0x42,0x24,0x18,0x81,0xff,0x55,0xaa};
+    const unsigned expanded[]={0,0,1,2,2,3,4,4,5,6,6,7};
+    for (unsigned mode=8;mode<=9;mode++) for (unsigned col=7;col<=8;col++) {
+        reset("D_MODE"); cpu.a=mode; run();
+        display_byte(23); display_byte(224); vdu(glyph,8);
+        unsigned stride=mode==8 ? 320 : 256, row=mode==8 ? 4 : 5;
+        unsigned x0=col*8, y0=row*12;
+        memset(video+0x10000,77,stride*(mode==8 ? 200 : 240));
+        memory[symbol("D_FG")]=37; memory[symbol("D_BG")]=201;
+        const uint8_t cursor[]={31,col,row}; vdu(cursor,sizeof(cursor));
+        display_byte(224);
+        CHECK(!basic_error && cpu.mmu.pages[2]==2);
+        for (unsigned y=y0-1;y<=y0+12;y++) for (unsigned x=x0-1;x<=x0+8;x++) {
+            unsigned want=77;
+            if (x>=x0 && x<x0+8 && y>=y0 && y<y0+12)
+                want=(glyph[expanded[y-y0]] & (0x80>>(x-x0))) ? 37 : 201;
+            CHECK(video[0x10000+y*stride+x]==want);
+        }
+    }
+}
 static void test_graphics_delete(void) {
     for (unsigned mode=8;mode<=9;mode++) for (unsigned action=0;action<=4;action++) {
         for (unsigned clipped=0;clipped<2;clipped++) {
@@ -1381,7 +1404,7 @@ static void test_graphics_examples(void) {
 }
 static void test_lander_erasure(void) {
     uint8_t program[8192];
-    unsigned size=tokenize_source("examples/gfx/lander/zos.bas",program);
+    unsigned size=tokenize_source("examples/gfx/lander.bas",program);
     unsigned input=example_line(program,180), input_end=input+program[input];
     reset("RUN0"); program_error_location();
     memcpy(memory+symbol("USER"),program,size);
@@ -1429,6 +1452,7 @@ int main(int argc, char **argv) {
     test_fill_boundary();
     test_video_spans();
     test_glyph_raster();
+    test_bitmap_glyph_pages();
     test_graphics_delete();
     test_lander_erasure();
     test_runtime_video_state();
