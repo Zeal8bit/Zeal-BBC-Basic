@@ -12,7 +12,8 @@ alongside this project. Supply `--emulator /path/to/Zeal-NativeEmulator` or
 `ZEAL_EMULATOR_PATH` for another location.
 
 These checks execute the assembled routines with the emulator's Z80 CPU core.
-The harness supplies flat RAM and deterministic Zeal syscall responses, including
+The harness supplies user RAM, banked ZVB video memory/registers, the emulator's
+standard font, and deterministic Zeal syscall responses, including
 short transfers, OS failures and virtual-page constraints. It does not replace
 end-to-end testing on Zeal OS or physical hardware.
 
@@ -55,6 +56,15 @@ Line-input checks cover bounded cooked reads, missing terminators, read failures
 EOF, redirected CRLF streams and overlong-line recovery. Redirected input reads
 through one LF at a time; overlong lines are drained and reported as errors.
 
+`LOAD$` checks import the four graphics source listings through the file adapter
+and compare their records with the original tokenizer. They cover arbitrary
+filename extensions, filename expressions, blank/indented lines, line endings,
+an unterminated final line, empty files, malformed input, line-number ordering,
+source/token buffer limits, memory exhaustion and file failures. Failed imports
+discard incomplete text and release their file handle, retaining failed closes
+for retry. The ZShell integration also imports and runs all four graphics demos
+through the real kernel and compares them with their saved `.bbc` copies.
+
 Cursor checks compare numeric PRINT output with and without two-coordinate TAB,
 including a video driver that overwrites scratch registers. Example checks use
 the assembled BASIC lexer: Hamurabi's binary must match its numbered text source,
@@ -90,3 +100,80 @@ INPUT, raw GET, numbered program entry/RUN, floating-point arithmetic during
 hardware interrupts, physical Escape from an infinite loop, SAVE, return to
 ZShell and filename auto-run after relaunch. These tests execute real kernel
 syscalls and the emulated PS/2 device; physical hardware remains unverified.
+
+
+## Display checks
+
+For a repeatable comparison of Lunar Lander update rates against a cycle-accurate
+BBC Model B, see [the benchmark and results](../docs/benchmarks/lander.md).
+`benchmark_lander.py` runs the existing native emulator and the published jsbeeb
+headless API, measuring 100 complete game updates after ten warm-up updates.
+
+`TIME` adapter checks cover centisecond conversion, fractional milliseconds,
+multiple sampled hardware wraps, setting the full 32-bit counter, and overflow.
+`INKEY$(0)` checks cover an empty queue, translated input, consumption, Escape
+and rejection of unsupported timeout values.
+
+Lunar Lander has a separate real-kernel gameplay test:
+
+```sh
+python3 tests/lander_integration.py \
+  --rom /path/to/os_with_romdisk.img --kernel-map /path/to/os.map
+```
+
+It uses the unchanged ZOS listing, real ZVB timer and emulated PS/2 keypresses
+to verify an unpowered crash and a controlled soft landing. It reads the
+interpreter's scalar-variable lists for assertions without altering game state.
+The successful flight crosses the 16-bit hardware clock wrap; the production
+clock's longer-blocking-read limitation is documented in the main README.
+
+The normal regression runner also executes BBC command parsing, VDU sequences,
+all supported GCOL actions, signed/relative plotting, clipping/origin changes,
+POINT, triangles, rectangles, horizontal fills, custom characters, text windows,
+scrolling, raw line editing, and both graphics demonstration programs. Bitmap
+text uses native 8x12 cells and must not write into adjacent cells.
+
+Graphics-text delete checks cover both bitmap modes, GCOL actions 0-4, a
+nonzero graphics background, clipping, cursor position and adjacent cells.
+The actual Lander listing is also run through descent to check that previous
+rocket cells are cleared while the current rocket remains visible. Set
+`BBC_LANDER_PREVIEW=/absolute/path/lander.ppm` to capture that frame.
+An interrupt is injected while video memory is mapped to verify arithmetic
+registers and restoration of the temporary page mapping.
+The font snapshot and other display scratch buffers are deliberately seeded
+with junk before the demo, proving they do not depend on zero-filled file data.
+
+The build runs `tests/check_layout.py` to verify that the image excludes runtime
+workspace, preserves required page alignment, leaves room below HIMEM, and keeps
+video helpers and interrupt wrappers below the temporary video mapping at &8000.
+The 3KB font backup and 960-byte triangle workspace occupy runtime RAM only.
+
+For a bitmap preview of the assembled graphics demonstration, set
+`BBC_GRAPHICS_PREVIEW=/absolute/path/preview.ppm` when running `tests/run.py`.
+The preview uses the actual indexed pixels and palette written by BASIC.
+
+The ZShell integration now also covers bitmap DRAW/GCOL/PLOT/POINT, INPUT and GET
+with display-owned echo, POS/VPOS in text mode, repeated mode changes, Escape in
+bitmap mode, and restoration of the shell's text display. Blocking raw reads are
+used while waiting for display input; nonblocking raw mode is restored before
+echo or drawing, so scrolling and Escape polling cannot block on a key.
+
+Size optimizations preserve the original interpreter modules. Graphics checks
+compare line pixels against a wide-integer reference across all supported line
+styles, both directions, and extreme signed endpoints. They also verify fills
+bounded by a different colour, asymmetric glyphs in every bitmap mode,
+transparent XOR text, video spans crossing MMU pages with an interrupt pending,
+and cold-start initialization of graphics state in poisoned runtime RAM.
+The span writer keeps its two mapped-access bytes below &8000; all relocated
+video state and scratch are checked as a separate runtime workspace region.
+Additional checks sample signed Y-coordinate scaling across the full input
+range, verify text-window bounds and clearing in all eight supported modes, and compare
+every default palette entry and BBC physical colour against RGB565 values.
+
+Native-mode checks reject BBC graphics selectors before video I/O, verify both
+text grids and font restoration, cover 320x200 and 256x240 bitmap geometry and
+9-bit colour arguments, and inspect 8/4-bit tile-font pixels, reserved colours,
+palette banks and text input. Mode selection lives in a separate Zeal module;
+the inherited hardware module is excluded from the build. The original command
+module has small hooks for display error recovery and `LOAD$`; the executor,
+expression evaluator and floating-point interpreter modules remain unchanged.

@@ -1,0 +1,71 @@
+{
+  "benchmark": "Lunar Lander unpowered coast",
+  "measured_updates": 100,
+  "warmup_updates": 10,
+  "timing": "Emulated CPU cycles; startup and host/debugger waiting excluded",
+  "bbc": {
+    "emulator": "jsbeeb",
+    "version": "2.11.0",
+    "model": "B-DFS1.2",
+    "cpu_hz": 2000000,
+    "basic_mode": 5,
+    "real_video": true,
+    "cpu_multiplier": 1,
+    "tube": false,
+    "source_sha256": "92a310445ea3226f16f99b28d41853db02ed98f77cd944d644e749235cc12f5f",
+    "rom_sha256": {
+      "os": "2d9fea69017864f6962704481829f95fee08446c8c3a13826d5d4e44000ac9de",
+      "basic": "45bd55dc0f6f0f8f1fe9e2481de7def206565eec8f600ba3068b849ca4132079",
+      "dfs": "e745e34895225a6650b712c1dd0656cb0b0b15f072a8ae6d9ea8d1ac257eb3d6"
+    },
+    "runs": [
+      {
+        "cycles": 45360701,
+        "seconds": 22.6803505,
+        "updates_per_second": 4.409102936923308
+      },
+      {
+        "cycles": 45360701,
+        "seconds": 22.6803505,
+        "updates_per_second": 4.409102936923308
+      },
+      {
+        "cycles": 45360701,
+        "seconds": 22.6803505,
+        "updates_per_second": 4.409102936923308
+      }
+    ]
+  },
+  "zeal": {
+    "emulator": "Zeal-NativeEmulator",
+    "cpu_hz": 10000000,
+    "basic_mode": 9,
+    "binary_sha256": "5a32ae12d352b3539a62950a2f849f70dac9db588d1a198973e0e59ac68ca4f0",
+    "emulator_sha256": "13fbf7e5dca8256b902304ba33f9babc28dc50cba8c7c43cc3c199151f096646",
+    "kernel_sha256": "f34d453a1feb17d34c582f64139c5e8a42ac3e0f6642874b1d588695b4036b4a",
+    "kernel_map_sha256": "9c907f72660a92e667bbab47c108a77f97f0ac8c08eefd1a419b4b4476e896c4",
+    "source_sha256": "f1c89db3cf6719ab957af4972f567017d402efc30676f04a29c05e98f89ec156",
+    "runs": [
+      {
+        "cycles": 329850982,
+        "seconds": 32.9850982,
+        "updates_per_second": 3.031672041528134
+      },
+      {
+        "cycles": 329850982,
+        "seconds": 32.9850982,
+        "updates_per_second": 3.031672041528134
+      },
+      {
+        "cycles": 329850982,
+        "seconds": 32.9850982,
+        "updates_per_second": 3.031672041528134
+      }
+    ]
+  },
+  "median_updates_per_second": {
+    "bbc": 4.409102936923308,
+    "zeal": 3.031672041528134
+  },
+  "zeal_relative_rate": 0.6875938450290863
+}

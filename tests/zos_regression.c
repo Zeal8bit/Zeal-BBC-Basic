@@ -2,6 +2,7 @@
  * CPU implementation is supplied by an unmodified Zeal-NativeEmulator checkout.
  */
 #include "hw/z80.h"
+#include "hw/zvb/default_font.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -9,7 +10,9 @@
 #include <string.h>
 
 static z80 cpu;
-static device_t ram;
+static device_t ram, video_io;
+static uint8_t video[0x20000], video_ports[256];
+static unsigned video_accesses;
 static uint8_t memory[65536], image[65536], file[65536];
 static const char *map_path;
 static uint32_t file_size, file_pos;
@@ -25,19 +28,41 @@ static unsigned stop_pc;
 static int follow_basic_error;
 static uint8_t keys[1024];
 static unsigned key_size, key_pos, keyboard_mode;
-static int inject_interrupt, interrupt_seen, escape_after_reads, input_reads;
+static int inject_interrupt, interrupt_seen, escape_after_reads, input_reads, interrupt_during_video;
 static int partial_release;
 static int file_exists;
 static uint8_t native_open[128], close_errors[128];
 static unsigned close_attempts[128], first_descriptor, exited;
 static int mode_failure, stdin_limit, clobber_syscall_alternates;
+static unsigned clock_ms;
+static unsigned clock_latch;
 static void invoke(const char *entry);
 
-static uint8_t read_ram(device_t *dev, uint32_t address) { (void)dev; return memory[address & 65535]; }
-static void write_ram(device_t *dev, uint32_t address, uint8_t value) { (void)dev; memory[address & 65535] = value; }
+static uint8_t read_ram(device_t *dev, uint32_t address) {
+    (void)dev;
+    if (address >= 0x100000 && address < 0x120000) { video_accesses++; return video[address - 0x100000]; }
+    return memory[address & 65535];
+}
+static void write_ram(device_t *dev, uint32_t address, uint8_t value) {
+    (void)dev;
+    if (address >= 0x100000 && address < 0x120000) { video_accesses++; video[address - 0x100000] = value; return; }
+    memory[address & 65535] = value;
+}
+static uint8_t read_io(device_t *dev, uint32_t port) {
+    if ((port & 0xf0) == 0xf0) return cpu.mmu.pages[dev->io_region.upper_addr >> 6];
+    if (video_ports[0x8e]==6 && port==0xa5) { clock_latch=clock_ms; return ~clock_latch; }
+    if (video_ports[0x8e]==6 && port==0xa6) return ~(clock_latch>>8);
+    return video_ports[port];
+}
+static void write_io(device_t *dev, uint32_t port, uint8_t value) {
+    (void)dev;
+    if ((port & 0xf0) == 0xf0) { cpu.mmu.pages[port & 3] = value; }
+    else video_ports[port] = value;
+}
 int mmu_init(mmu_t *mmu) {
     memset(mmu, 0, sizeof(*mmu));
     for (int i = 0; i < 4; ++i) { mmu->pages[i] = i; mmu->vpages[i].dev = &ram; }
+    for (int i = 0; i < 256; ++i) mmu->io_mapping[i].dev = &video_io;
     return 0;
 }
 void vtimer_tick(uint64_t elapsed) { (void)elapsed; }
@@ -73,6 +98,9 @@ static void reset(const char *entry) {
     memcpy(memory, image, sizeof(memory)); z80_init(&cpu);
     cpu.pc = symbol(entry); cpu.sp = 0xf600;
     memory[cpu.sp] = 0; memory[cpu.sp + 1] = 0x30;
+    memset(video, 0, sizeof(video)); memset(video_ports, 0, sizeof(video_ports));
+    memcpy(video + 0x3000, default_font, DEFAULT_FONT_SIZE);
+    video_ports[0x82] = 1; video_accesses = 0;
     fail_call = -1; failure = 19; close_failure = 0; short_limit = -1;
     opened = closed = transfers = basic_error = invalid_buffer = 0;
     fail_transfer = premature_eof = 0;
@@ -82,17 +110,18 @@ static void reset(const char *entry) {
     follow_basic_error = 0;
     key_size = key_pos = keyboard_mode = 0;
     inject_interrupt = interrupt_seen = escape_after_reads = input_reads = 0;
-    partial_release = 0;
+    partial_release = 0; interrupt_during_video = 0;
     file_exists = 1; last_flags = 2;
     memset(native_open, 0, sizeof(native_open)); native_open[0] = native_open[1] = 1;
     memset(close_errors, 0, sizeof(close_errors)); memset(close_attempts, 0, sizeof(close_attempts));
     first_descriptor = 2; exited = 0;
     mode_failure = 0; stdin_limit = -1; clobber_syscall_alternates = 0;
+    clock_ms = 0;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0xf100, "test.bbc");
-    memory[symbol("PAGE") + 1] = 0x80;
-    memory[symbol("TOP")] = 3; memory[symbol("TOP") + 1] = 0x80;
-    set_hl(0xf100); set_de(0x8000); set_bc(16);
+    memory[symbol("PAGE")] = symbol("USER"); memory[symbol("PAGE") + 1] = symbol("USER") >> 8;
+    memory[symbol("TOP")] = symbol("USER") + 3; memory[symbol("TOP") + 1] = (symbol("USER") + 3) >> 8;
+    set_hl(0xf100); set_de(symbol("USER")); set_bc(16);
 }
 static void syscall(void) {
     unsigned call = cpu.l, address = cpu.d << 8 | cpu.e, count = cpu.b << 8 | cpu.c;
@@ -171,6 +200,9 @@ static void syscall(void) {
         set_bc(file_pos >> 16); set_de(file_pos & 65535); break;
     }
     case 7:
+        if (cpu.h == 0 && cpu.c == 2) {
+            memory[address] = cursor_x; memory[address + 1] = cursor_y; break;
+        }
         if (cpu.h == 0 && cpu.c == 4) {
             cursor_x = cpu.d; cursor_y = cpu.e; cursor_sets++;
             set_bc(0xdead); /* Driver scratch registers must not alter PRINT. */
@@ -191,16 +223,19 @@ static void syscall(void) {
 }
 static void run(void) {
     unsigned error_entry = symbol("EXTERR");
-    for (unsigned step = 0; step < 2000000; ++step) {
+    for (unsigned step = 0; step < 30000000; ++step) {
         if (cpu.pc == 0x3000 || (stop_pc && cpu.pc == stop_pc)) return;
         if (cpu.pc == error_entry && !follow_basic_error) { basic_error = cpu.a; return; }
+        if (interrupt_during_video && cpu.mmu.pages[2] >= 0x40 && cpu.iff1) {
+            interrupt_during_video = 0; inject_interrupt = 1;
+        }
         if (inject_interrupt && cpu.iff1) {
             inject_interrupt = 0; z80_gen_int(&cpu, cpu.interrupt_mode == 2 ? 2 : 0xff);
         }
         if (cpu.pc == 0x2000) interrupt_seen++;
         if (cpu.pc == 8) syscall(); else z80_step(&cpu);
     }
-    fprintf(stderr, "Instruction limit at %04x\n", cpu.pc); exit(1);
+    fprintf(stderr, "Instruction limit at %04x stop=%04x sp=%04x input=%u/%u\n", cpu.pc,stop_pc,cpu.sp,key_pos,key_size); exit(1);
 }
 #define CHECK(condition) do { checks++; if (!(condition)) { \
     fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); exit(1); } } while (0)
@@ -223,16 +258,16 @@ static void test_errors(void) {
     reset("OSBPUT"); cpu.e = 2; short_limit = 0; run(); CHECK(basic_error == (128 | 1));
 }
 static void test_loads(void) {
-    const unsigned lengths[] = {0, 1, 8191, 8192, 8193, 13914, 16384, 16385, 28000};
+    const unsigned lengths[] = {0, 1, 8191, 8192, 8193, 13914, 16384, 16385, 18000};
     for (unsigned i = 0; i < sizeof(lengths) / sizeof(*lengths); ++i) {
         reset("OSLOAD"); file_size = lengths[i]; set_bc(0x7000); run();
         CHECK(!basic_error); CHECK(cpu.cf); CHECK(closed == 1);
         CHECK(file_pos == file_size); CHECK(!invalid_buffer);
-        CHECK(!memcmp(memory + 0x8000, file, file_size));
+        CHECK(!memcmp(memory + symbol("USER"), file, file_size));
     }
-    reset("OSLOAD"); file_size = 17; memory[0x8000] = 0xaa; run();
+    reset("OSLOAD"); file_size = 17; memory[symbol("USER")] = 0xaa; run();
     CHECK(!cpu.cf); CHECK(!basic_error); CHECK(transfers == 0);
-    CHECK(memory[0x8000] == 0xaa); CHECK(closed == 1);
+    CHECK(memory[symbol("USER")] == 0xaa); CHECK(closed == 1);
     reset("OSLOAD"); file_size = 65536; set_bc(0x7000); run();
     CHECK(!cpu.cf); CHECK(!basic_error); CHECK(transfers == 0); CHECK(closed == 1);
     reset("OSLOAD"); file_size = 10000; set_de(0xbffd); set_bc(10000); short_limit = 257; run();
@@ -257,23 +292,23 @@ static void test_validation(void) {
         strcpy((char *)memory + symbol("ACCS"), "test.bbc");
         stop_pc = i < 9 ? symbol("NEW") : 0x3000; run();
         CHECK(!basic_error); CHECK(cpu.pc == stop_pc);
-        if (i < 9) CHECK(memory[0x8000] == 0);
+        if (i < 9) CHECK(memory[symbol("USER")] == 0);
         else CHECK(memory[symbol("TOP")] == (i == 9 ? 7 : 3));
     }
     reset("LOAD0"); strcpy((char *)memory + symbol("ACCS"), "test.bbc");
     file_size = 100; fail_transfer = 2; short_limit = 4;
     memory[symbol("ERRTRP")] = 123; run();
-    CHECK(basic_error == (128 | 19)); CHECK(memory[0x8000] == 0);
+    CHECK(basic_error == (128 | 19)); CHECK(memory[symbol("USER")] == 0);
     CHECK(memory[symbol("ERRTRP")] == 0); CHECK(memory[symbol("TOP")] == 3);
 }
 static void test_saves(void) {
-    const unsigned lengths[] = {0, 1, 16383, 16384, 16385, 28000};
+    const unsigned lengths[] = {0, 1, 16383, 16384, 16385, 18000};
     for (unsigned i = 0; i < sizeof(lengths) / sizeof(*lengths); ++i) {
         reset("OSSAVE"); unsigned length = lengths[i]; set_bc(length);
-        for (unsigned j = 0; j < length; ++j) memory[0x8000 + j] = (uint8_t)(j * 7);
+        for (unsigned j = 0; j < length; ++j) memory[symbol("USER") + j] = (uint8_t)(j * 7);
         run();
         CHECK(!basic_error); CHECK(!invalid_buffer); CHECK(closed == 1);
-        CHECK(file_size == length); CHECK(!memcmp(file, memory + 0x8000, length));
+        CHECK(file_size == length); CHECK(!memcmp(file, memory + symbol("USER"), length));
     }
     reset("OSSAVE"); set_de(0xbffd); set_bc(10000); short_limit = 257; run();
     CHECK(!basic_error); CHECK(!invalid_buffer); CHECK(closed == 1);
@@ -362,11 +397,11 @@ static void open_more(unsigned descriptor) {
 }
 static void program_error_location(void) {
     unsigned page = symbol("PAGE"), himem = symbol("HIMEM"), errlin = symbol("ERRLIN");
-    memory[page] = 0; memory[page + 1] = 0x80;
+    memory[page] = symbol("USER"); memory[page + 1] = symbol("USER") >> 8;
     memory[himem] = 0; memory[himem + 1] = 0xf7;
-    memory[errlin] = 3; memory[errlin + 1] = 0x80;
+    memory[errlin] = symbol("USER") + 3; memory[errlin + 1] = (symbol("USER") + 3) >> 8;
     const uint8_t program[] = {5, 10, 0, 0xe0, 10, 0, 0xff, 0xff};
-    memcpy(memory + 0x8000, program, sizeof(program));
+    memcpy(memory + symbol("USER"), program, sizeof(program));
 }
 static void test_close_all(void) {
     reset("OPENIN"); native_open[7] = 1; open_basic(); open_more(5); open_more(127);
@@ -412,7 +447,7 @@ static void test_chain_names(void) {
         memset(memory + accs, 'X', 256);
         strcpy((char *)memory + 0xf200, "\"test.bbc\"\n"); cpu.iy = 0xf200;
         memory[himem] = 0; memory[himem + 1] = 0xf7;
-        memory[page] = 0; memory[page + 1] = 0x80;
+        memory[page] = symbol("USER"); memory[page + 1] = symbol("USER") >> 8;
         file_size = 3; file[0] = 0; file[1] = file[2] = 0xff;
         stop_pc = symbol("RUN0"); run();
         CHECK(!basic_error); CHECK(!strcmp(opened_name, "test.bbc"));
@@ -426,13 +461,13 @@ static void test_bundled_loads(void) {
         reset("CHAIN"); FILE *fp = fopen(paths[i], "rb"); assert(fp);
         file_size = fread(file, 1, sizeof(file), fp); fclose(fp);
         unsigned page = symbol("PAGE"), himem = symbol("HIMEM");
-        memory[page] = 0; memory[page + 1] = 0x80;
+        memory[page] = symbol("USER"); memory[page + 1] = symbol("USER") >> 8;
         memory[himem] = 0; memory[himem + 1] = 0xf7;
         snprintf((char *)memory + 0xf200, 128, "\"%s\"\n", paths[i]); cpu.iy = 0xf200;
         stop_pc = symbol("RUN0"); run();
         CHECK(!basic_error); CHECK(cpu.pc == stop_pc);
         CHECK(!strcmp(opened_name, paths[i])); CHECK(file_pos == file_size);
-        CHECK(!memcmp(memory + 0x8000, file, file_size));
+        CHECK(!memcmp(memory + symbol("USER"), file, file_size));
     }
 }
 static void prepare_keyboard(void) {
@@ -501,11 +536,11 @@ static void test_escape(void) {
     /* Real BASIC GOTO loop must reach Escape without calling GET/INPUT. */
     reset("RUN0"); prepare_keyboard();
     unsigned page = symbol("PAGE"), himem = symbol("HIMEM");
-    memory[page] = 0; memory[page + 1] = 0x80;
+    memory[page] = symbol("USER"); memory[page + 1] = symbol("USER") >> 8;
     memory[himem] = 0; memory[himem + 1] = 0xf7;
     const uint8_t loop[] = {9, 10, 0, 0xe5, 0x8d, 0x54, 0x4a, 0x40, 10, 0, 0xff, 0xff};
-    memcpy(memory + 0x8000, loop, sizeof(loop));
-    unsigned top = symbol("TOP"); memory[top] = 12; memory[top + 1] = 0x80;
+    memcpy(memory + symbol("USER"), loop, sizeof(loop));
+    unsigned top = symbol("TOP"); memory[top] = symbol("USER") + 12; memory[top + 1] = (symbol("USER") + 12) >> 8;
     escape_after_reads = 3; stop_pc = symbol("ESCAPE"); run();
     CHECK(cpu.pc == stop_pc); CHECK(input_reads == 3);
     /* Continue the real error path back to the prompt, rather than intercept it. */
@@ -609,7 +644,7 @@ static void test_commands(void) {
     reset("RUN0"); program_error_location();
     const uint8_t commented[] = {12,10,0,'*','|','c','o','m','m','e','n',10,
         5,20,0,0xe0,10,0,255,255};
-    memcpy(memory + 0x8000, commented, sizeof(commented));
+    memcpy(memory + symbol("USER"), commented, sizeof(commented));
     stop_pc = symbol("WARM"); run();
     CHECK(!basic_error); CHECK(!exited); CHECK(cpu.pc == stop_pc);
     reset("CLI"); strcpy((char *)memory + 0xf200, "\"\":\340\n"); cpu.iy = 0xf200;
@@ -663,6 +698,152 @@ static unsigned tokenize_source(const char *path, uint8_t *dest) {
     fclose(fp); dest[length++] = 0; dest[length++] = 255; dest[length++] = 255;
     return length;
 }
+static void text_import(const void *source, unsigned length) {
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory + symbol("ACCS"), "anything.bbcbas");
+    memcpy(file, source, length); file_size = length;
+    run();
+}
+static void test_text_import(void) {
+    const char *paths[]={"examples/gfx/rainbow.bas", "examples/gfx/fireworks.bas",
+                         "examples/gfx/bounce.bas", "examples/gfx/tileparty.bas"};
+    for (unsigned i=0;i<4;i++) {
+        uint8_t expected[8192], source[8192];
+        unsigned length=tokenize_source(paths[i],expected);
+        FILE *fp=fopen(paths[i],"rb"); assert(fp);
+        unsigned size=fread(source,1,sizeof(source),fp); fclose(fp);
+        text_import(source,size);
+        CHECK(!basic_error); CHECK(closed==1); CHECK(!native_open[2]);
+        CHECK(!strcmp(opened_name,"anything.bbcbas"));
+        CHECK(!memcmp(memory+symbol("USER"),expected,length));
+        CHECK((memory[symbol("TOP")]|memory[symbol("TOP")+1]<<8)==symbol("USER")+length);
+        CHECK(memory[symbol("TEXT_ACTIVE")]==0); CHECK(!invalid_buffer);
+        CHECK(file_pos==file_size); /* every byte came through the read adapter */
+    }
+    const char *endings[]={"10 END\n", "10 END\r\n", "10 END\r", "10 END"};
+    uint8_t expected[64]; unsigned length;
+    text_import(endings[0],strlen(endings[0]));
+    length=(memory[symbol("TOP")]|memory[symbol("TOP")+1]<<8)-symbol("USER");
+    memcpy(expected,memory+symbol("USER"),length);
+    for (unsigned i=0;i<4;i++) {
+        text_import(endings[i],strlen(endings[i]));
+        CHECK(!basic_error); CHECK(!memcmp(memory+symbol("USER"),expected,length));
+    }
+    const char indented[]=" \t\r\n\t10\tEND\r\n \t";
+    text_import(indented,strlen(indented));
+    CHECK(!basic_error); CHECK(!memcmp(memory+symbol("USER"),expected,length));
+    text_import("",0); CHECK(!basic_error); CHECK(memory[symbol("USER")]==0);
+    CHECK(memory[symbol("USER")+1]==255 && memory[symbol("USER")+2]==255);
+    const char highest[]="10 END\n65535 END\n";
+    text_import(highest,strlen(highest)); CHECK(!basic_error);
+    CHECK(memory[symbol("USER")+6]==255 && memory[symbol("USER")+7]==255);
+    char boundary[256]; memset(boundary,'A',sizeof(boundary));
+    memcpy(boundary,"10 REM ",7); boundary[255]='\n';
+    text_import(boundary,sizeof(boundary)); CHECK(!basic_error);
+    CHECK(memory[symbol("USER")]==254); CHECK(!invalid_buffer);
+
+    const char *bad[]={"PRINT 1\n", "0 END\n", "10 END\n10 END\n",
+                       "20 END\n10 END\n", "65536 END\n", "10\n",
+                       "10 END\nRUN\n", "10 END\n20 PRINT \x80\n", "10 END\0\n"};
+    for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++) {
+        text_import(bad[i],i==8 ? 9 : strlen(bad[i]));
+        CHECK(basic_error==255 || basic_error==20);
+        invoke("RESET");
+        CHECK(memory[symbol("USER")]==0); CHECK(memory[symbol("TEXT_ACTIVE")]==0);
+        CHECK(!native_open[2]); CHECK(memory[symbol("ERRTRP")]==0);
+    }
+    /* Raw lines cannot overflow ACCS, and lexer expansion cannot overflow BUFFER. */
+    char long_line[300]; memset(long_line,'A',sizeof(long_line));
+    memcpy(long_line,"10 REM ",7); long_line[sizeof(long_line)-1]='\n';
+    text_import(long_line,sizeof(long_line)); CHECK(basic_error==255);
+    CHECK(strstr(output,"Text source line 1")!=NULL);
+    CHECK(memory[symbol("USER")]==0); CHECK(!native_open[2]);
+    char expanded[256]="10 ";
+    /* Short source line references expand to four-byte encoded line numbers. */
+    for (unsigned i=0;i<55;i++) strcat(expanded,"G.1:");
+    strcat(expanded,"END\n");
+    text_import(expanded,strlen(expanded));
+    CHECK(cpu.pc==symbol("EXTERR")); /* native lexer's Line space error is ERR=0 */
+    invoke("RESET"); CHECK(memory[symbol("USER")]==0); CHECK(!native_open[2]);
+
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory+symbol("ACCS"),"missing.bas"); file_exists=0;
+    memory[symbol("USER")]=77; run();
+    CHECK(basic_error==132); CHECK(memory[symbol("USER")]==77); CHECK(!opened);
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory+symbol("ACCS"),"test.bas");
+    memcpy(file,"10 END\n",7); file_size=7; fail_transfer=4;
+    run(); CHECK(basic_error==147); invoke("RESET");
+    CHECK(memory[symbol("USER")]==0); CHECK(!native_open[2]);
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory+symbol("ACCS"),"test.bas");
+    memcpy(file,"10 END\n",7); file_size=7; close_errors[2]=6;
+    run(); CHECK(basic_error==134); invoke("RESET");
+    CHECK(memory[symbol("USER")]==0); CHECK(native_open[2]);
+    close_errors[2]=0; invoke("OSCLEAN"); CHECK(!native_open[2]);
+
+    reset("Z_IMPORT_TEXT"); program_error_location(); prepare_keyboard();
+    strcpy((char *)memory+symbol("ACCS"),"test.bas");
+    memcpy(file,"10 END\n",7); file_size=7; keys[0]=0xf0; key_size=1;
+    run(); CHECK(basic_error==17); invoke("RESET");
+    CHECK(memory[symbol("USER")]==0); CHECK(!native_open[2]);
+    CHECK(strstr(output,"Text source line 1")!=NULL);
+
+    reset("Z_IMPORT_TEXT"); program_error_location();
+    strcpy((char *)memory+symbol("ACCS"),"test.bas");
+    memcpy(file,long_line,100); file[99]='\n'; file_size=100;
+    cpu.sp=symbol("USER")+280;
+    run(); CHECK(cpu.pc==symbol("EXTERR")); CHECK(memory[symbol("USER")]==0);
+    CHECK(!native_open[2]); CHECK(strstr(output,"Text source line 1")!=NULL);
+
+    /* Parse the public syntax, including a filename expression with any suffix. */
+    unsigned size=tokenize_text("LOAD$ \"anything\"+\".bbcbas\"\n",expected);
+    reset("XEQ"); program_error_location();
+    memcpy(memory+0xf200,expected,size+1); memory[0xf200+size]=10; cpu.iy=0xf200;
+    memcpy(file,"10 END\n",7); file_size=7; stop_pc=symbol("WARM"); run();
+    CHECK(!basic_error); CHECK(cpu.pc==stop_pc); CHECK(!strcmp(opened_name,"anything.bbcbas"));
+    CHECK(memory[symbol("USER")]==5); CHECK(memory[symbol("USER")+1]==10);
+}
+static void test_time_and_inkey(void) {
+    reset("Z_TIME_INIT"); run();
+    CHECK(!basic_error); CHECK(memory[symbol("TIME_VALUE")]==0);
+    CHECK(video_ports[0xa1]==0x4f && video_ports[0xa2]==0xc3 && video_ports[0xa0]==0xe1);
+    video_ports[0x8e]=4;
+    for (unsigned elapsed=1;elapsed<=140000;elapsed+=137) {
+        clock_ms=elapsed; invoke("GETIME");
+        CHECK(!basic_error);
+        CHECK((((uint32_t)cpu.d<<24)|((uint32_t)cpu.e<<16)|cpu.h<<8|cpu.l)==elapsed/10);
+        CHECK(memory[symbol("TIME_FRACTION")]==elapsed%10);
+        CHECK(video_ports[0x8e]==4);
+    }
+    unsigned before=clock_ms;
+    set_de(0xffff); set_hl(0xfff6); invoke("PUTIME");
+    CHECK(clock_ms==before); /* TIME= does not alter the OS clock */
+    invoke("GETIME"); CHECK(cpu.d==255 && cpu.e==255 && cpu.h==255 && cpu.l==246);
+    clock_ms+=200; invoke("GETIME"); CHECK(cpu.d==0 && cpu.e==0 && cpu.h==0 && cpu.l==10);
+
+    reset("OSKEY"); prepare_keyboard(); set_hl(0); run();
+    CHECK(!basic_error); CHECK(!cpu.cf); CHECK(key_pos==key_size);
+    reset("OSKEY"); prepare_keyboard(); set_hl(0);
+    keys[0]='9'; key_size=1; set_bc(0x1234); set_de(0x5678); run();
+    CHECK(!basic_error); CHECK(cpu.cf); CHECK(cpu.a=='9');
+    CHECK((cpu.b<<8|cpu.c)==0x1234 && (cpu.d<<8|cpu.e)==0x5678);
+    set_hl(0); invoke("OSKEY"); CHECK(!cpu.cf); /* consume each key only once */
+    reset("OSKEY"); prepare_keyboard(); set_hl(0); keys[0]=0xf0; key_size=1;
+    run(); CHECK(basic_error==17);
+    reset("OSKEY"); set_hl(1); run(); CHECK(basic_error==255);
+
+    uint8_t statement[256];
+    for (unsigned available=0;available<2;available++) {
+        unsigned size=tokenize_text("A$=INKEY$(0):B%=LEN(A$):END",statement);
+        reset("XEQ"); program_error_location(); prepare_keyboard();
+        invoke("CLEAR"); cpu.pc=symbol("XEQ");
+        memcpy(memory+0xf200,statement,size); memory[0xf200+size]=10; cpu.iy=0xf200;
+        if (available) { keys[0]='9'; key_size=1; }
+        stop_pc=symbol("CLOOP"); run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
+        CHECK(memory[symbol("STAVAR")+2*4]==available);
+    }
+}
 static unsigned example_line(const uint8_t *program, unsigned number) {
     for (unsigned pos = 0; program[pos]; pos += program[pos]) {
         if ((program[pos+1] | program[pos+2] << 8) == number) return pos;
@@ -691,12 +872,12 @@ static void test_hamurabi_source(void) {
     CHECK((memory[vars+4] | memory[vars+5] << 8) == 1005);
     CHECK((memory[vars+76] | memory[vars+77] << 8) == 2700);
     CHECK(memory[vars+12] == 0 && memory[vars+13] == 0);
-    reset("XEQ"); memcpy(memory + 0x8000, actual, size);
+    reset("XEQ"); memcpy(memory + symbol("USER"), actual, size);
     stop_pc = symbol("exec:XEQ0"); unsigned stack = cpu.sp;
     for (unsigned attempt = 0; attempt < 20; ++attempt) {
-        cpu.pc = symbol("XEQ"); cpu.iy = 0x8000 + retry + 3; run();
+        cpu.pc = symbol("XEQ"); cpu.iy = symbol("USER") + retry + 3; run();
         CHECK(!basic_error); CHECK(cpu.sp == stack);
-        CHECK(cpu.iy == 0x8000 + example_line(actual, 440));
+        CHECK(cpu.iy == symbol("USER") + example_line(actual, 440));
     }
 
 }
@@ -713,8 +894,8 @@ static void test_blackjack_procedure(void) {
     CHECK(program[definition + 3] == 0xdd && program[definition + 4] == 0xf2); /* DEF PROC */
     CHECK(!memcmp(program + definition + 5, "whoone\n", 7));
     reset("XEQ"); program_error_location();
-    memcpy(memory + 0x8000, program, size);
-    unsigned top = 0x8000 + size;
+    memcpy(memory + symbol("USER"), program, size);
+    unsigned top = symbol("USER") + size;
     memory[symbol("TOP")] = top; memory[symbol("TOP") + 1] = top >> 8;
     invoke("CLEAR");
     memcpy(memory + 0xf200, init, init_size); memory[0xf200 + init_size] = 10;
@@ -741,12 +922,550 @@ static void test_irq_vectors(void) {
         invoke("BYE"); CHECK(exited); CHECK(cpu.i == 0x21);
     }
 }
+static void display_byte(unsigned byte) {
+    cpu.a = byte; invoke("OSWRCH"); CHECK(!basic_error);
+    CHECK(cpu.mmu.pages[0] == 0 && cpu.mmu.pages[2] == 2);
+}
+static void plot(unsigned op, int x, int y) {
+    cpu.a = op; set_de((uint16_t)x); set_hl((uint16_t)y); invoke("G_PLOT"); CHECK(!basic_error);
+    CHECK(cpu.mmu.pages[0] == 0 && cpu.mmu.pages[2] == 2);
+}
+static int point(int x, int y) {
+    set_de((uint16_t)x); set_hl((uint16_t)y); invoke("G_POINT"); CHECK(!basic_error);
+    return (int16_t)(cpu.h << 8 | cpu.l);
+}
+static void vdu(const uint8_t *bytes, unsigned count) {
+    for (unsigned i=0;i<count;i++) display_byte(bytes[i]);
+}
+/* Compare visible pixels with a wide-integer reference, including lines
+ * whose off-screen error terms exceed a signed Z80 word when doubled. */
+static void test_line_raster(void) {
+    static const int endpoints[][4] = {
+        {-32768,100,32767,104}, {100,-32768,104,32767},
+        {0,0,1276,1020}, {1276,0,0,1020}, {0,512,1276,512},
+        {640,0,640,1020}, {80,80,80,80}, {0,0,80,40}, {0,0,40,80}
+    };
+    uint8_t expected[64000];
+    for (unsigned i=0;i<sizeof(endpoints)/sizeof(*endpoints);i++) {
+        for (unsigned reverse=0;reverse<2;reverse++) {
+            for (unsigned family=0;family<64;family+=8) {
+                reset("D_MODE"); cpu.a=8; run(); CHECK(!basic_error);
+                const int *p=endpoints[i]; unsigned a=reverse ? 2 : 0, b=reverse ? 0 : 2;
+                plot(4,p[a],p[a+1]); plot(family+5,p[b],p[b+1]);
+                memset(expected,0,sizeof(expected));
+                int x=p[a]>>2, y=199-(((p[a+1]>>2)*25)>>5);
+                int tx=p[b]>>2, ty=199-(((p[b+1]>>2)*25)>>5);
+                int dx=abs(tx-x), dy=-abs(ty-y), sx=x<tx ? 1 : -1, sy=y<ty ? 1 : -1;
+                int error=dx+dy; unsigned step=0;
+                for (;;) {
+                    int last=x==tx && y==ty;
+                    if (!(family&8 && last) && !(family&32 && !step) && !(family&16 && (step&1))
+                        && x>=0 && x<320 && y>=0 && y<200) expected[y*320+x]=255;
+                    if (last) break;
+                    int twice=error*2;
+                    if (twice>=dy) { error+=dy; x+=sx; }
+                    if (twice<=dx) { error+=dx; y+=sy; }
+                    step++;
+                }
+                CHECK(!memcmp(video+0x10000,expected,sizeof(expected)));
+            }
+        }
+    }
+}
+static void test_fill_boundary(void) {
+    reset("D_MODE"); cpu.a=8; run(); CHECK(!basic_error);
+    cpu.a=0; set_de(2); invoke("G_COLOUR");
+    plot(4,80,80); plot(5,80,200); plot(4,200,80); plot(5,200,200);
+    cpu.a=0; set_de(1); invoke("G_COLOUR"); plot(77,120,120);
+    CHECK(point(40,120)==0 && point(80,120)==2);
+    CHECK(point(120,120)==1 && point(200,120)==2 && point(240,120)==0);
+    /* A seed on an existing non-background pixel must not fill or erase it. */
+    plot(77,80,120); CHECK(point(80,120)==2 && point(40,120)==0);
+}
+static void test_video_spans(void) {
+    const unsigned starts[]={0x3ff7,0x7ff7,0xbff7,0xfff7};
+    for (unsigned action=0;action<4;action++) {
+        for (unsigned i=0;i<4;i++) {
+            unsigned start=starts[i], count=i==3 ? 9 : 73;
+            reset("V_PAINT");
+            for (unsigned x=0;x<65536;x++) video[0x10000+x]=x&3;
+            prepare_keyboard(); inject_interrupt=0; interrupt_during_video=1;
+            cpu.a=2; cpu.l=action; set_de(start); set_bc(count); run();
+            check_alternates(); CHECK(interrupt_seen && cpu.mmu.pages[2]==2);
+            for (unsigned x=start-1;x<start+count+(i==3 ? 0 : 1);x++) {
+                unsigned old=x&3, want=old;
+                if (x>=start && x<start+count)
+                    want=action==0 ? 2 : action==1 ? old|2 : action==2 ? old&2 : old^2;
+                CHECK(video[0x10000+x]==want);
+            }
+        }
+    }
+    reset("V_PAINT"); cpu.a=2; cpu.l=3; set_de(0xffff); set_bc(0); run();
+    CHECK(!video_accesses && cpu.mmu.pages[2]==2);
+}
+static void test_glyph_raster(void) {
+    const uint8_t glyph[]={0x81,0x42,0x24,0x18,0x81,0xff,0x55,0xaa};
+    const unsigned expanded[]={0,0,1,2,2,3,4,4,5,6,6,7};
+    for (unsigned mode=8;mode<=9;mode++) {
+        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        display_byte(23); display_byte(224); vdu(glyph,8);
+        const uint8_t cursor[]={31,1,3}; vdu(cursor,sizeof(cursor)); display_byte(224);
+        unsigned stride=mode==8 ? 320 : 256;
+        for (unsigned y=35;y<=48;y++) for (unsigned x=7;x<=16;x++) {
+            unsigned want=0;
+            if (x>=8 && x<16 && y>=36 && y<48 && (glyph[expanded[y-36]] & (0x80>>(x-8)))) want=255;
+            CHECK(video[0x10000+y*stride+x]==want);
+        }
+        /* Transparent graphics text applies XOR and advances by one native cell. */
+        unsigned gx=mode==8 ? 40 : 32, gy=mode==8 ? 121 : 146;
+        for (unsigned y=0;y<12;y++) memset(video+0x10000+(gy+y)*stride+gx,1,8);
+        cpu.a=3; set_de(2); invoke("G_COLOUR"); display_byte(5);
+        for (unsigned pass=0;pass<2;pass++) {
+            plot(4,160,400); display_byte(224);
+            for (unsigned y=0;y<12;y++) for (unsigned x=0;x<8;x++) {
+                unsigned want=pass==0 && (glyph[expanded[y]] & (0x80>>x)) ? 3 : 1;
+                CHECK(video[0x10000+(gy+y)*stride+gx+x]==want);
+            }
+            CHECK((memory[symbol("G_X")]|memory[symbol("G_X")+1]<<8)==(mode==8 ? 192 : 200));
+        }
+    }
+}
+/* Opaque rows either side of a video MMU boundary, with non-default colours.
+ * A glyph can cross pages vertically; each aligned eight-pixel row cannot. */
+static void test_bitmap_glyph_pages(void) {
+    const uint8_t glyph[]={0x81,0x42,0x24,0x18,0x81,0xff,0x55,0xaa};
+    const unsigned expanded[]={0,0,1,2,2,3,4,4,5,6,6,7};
+    for (unsigned mode=8;mode<=9;mode++) for (unsigned col=7;col<=8;col++) {
+        reset("D_MODE"); cpu.a=mode; run();
+        display_byte(23); display_byte(224); vdu(glyph,8);
+        unsigned stride=mode==8 ? 320 : 256, row=mode==8 ? 4 : 5;
+        unsigned x0=col*8, y0=row*12;
+        memset(video+0x10000,77,stride*(mode==8 ? 200 : 240));
+        memory[symbol("D_FG")]=37; memory[symbol("D_BG")]=201;
+        const uint8_t cursor[]={31,col,row}; vdu(cursor,sizeof(cursor));
+        display_byte(224);
+        CHECK(!basic_error && cpu.mmu.pages[2]==2);
+        for (unsigned y=y0-1;y<=y0+12;y++) for (unsigned x=x0-1;x<=x0+8;x++) {
+            unsigned want=77;
+            if (x>=x0 && x<x0+8 && y>=y0 && y<y0+12)
+                want=(glyph[expanded[y-y0]] & (0x80>>(x-x0))) ? 37 : 201;
+            CHECK(video[0x10000+y*stride+x]==want);
+        }
+    }
+}
+static void test_graphics_delete(void) {
+    for (unsigned mode=8;mode<=9;mode++) for (unsigned action=0;action<=4;action++) {
+        for (unsigned clipped=0;clipped<2;clipped++) {
+            reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+            unsigned stride=mode==8 ? 320 : 256;
+            unsigned x0=mode==8 ? 40 : 32, y0=mode==8 ? 121 : 146;
+            memset(video+0x10000,77,stride*(mode==8 ? 200 : 240));
+            for (unsigned y=0;y<12;y++) memset(video+0x10000+(y0+y)*stride+x0,31,8);
+            cpu.a=action; set_de(7); invoke("G_COLOUR");
+            cpu.a=action; set_de(256+201); invoke("G_COLOUR");
+            if (clipped) {
+                unsigned left=mode==8 ? 168 : 170;
+                const uint8_t window[]={24,left&255,left>>8,0,0,255,4,132,1};
+                vdu(window,sizeof(window));
+            }
+            display_byte(5); plot(4,160,400); display_byte(32);
+            /* Ordinary graphics spaces remain transparent. */
+            CHECK(video[0x10000+y0*stride+x0]==31);
+            display_byte(127);
+            CHECK(!basic_error);
+            unsigned left=memory[symbol("G_CL")]|memory[symbol("G_CL")+1]<<8;
+            unsigned top=memory[symbol("G_CT")]|memory[symbol("G_CT")+1]<<8;
+            for (unsigned y=y0-1;y<=y0+12;y++) for (unsigned x=x0-1;x<=x0+8;x++) {
+                unsigned inside=x>=x0 && x<x0+8 && y>=y0 && y<y0+12;
+                unsigned want=inside ? (x>=left && y>=top ? 201 : 31) : 77;
+                CHECK(video[0x10000+y*stride+x]==want);
+            }
+            CHECK((memory[symbol("G_X")]|memory[symbol("G_X")+1]<<8)==160);
+            CHECK((memory[symbol("G_Y")]|memory[symbol("G_Y")+1]<<8)==400);
+            CHECK(memory[symbol("G_ACTION")]==action && memory[symbol("G_FG")]==7);
+            CHECK(memory[symbol("G_BG")]==201 && memory[symbol("D_GRAPH_TEXT")]==1);
+        }
+    }
+}
+static void test_runtime_video_state(void) {
+    reset("OSINIT");
+    memset(memory+symbol("DISPLAY_SCRATCH"),0xa5,symbol("DISPLAY_SCRATCH_SIZE"));
+    set_bc(0); run(); CHECK(!basic_error);
+    CHECK(memory[symbol("G_ACTION")]==0 && memory[symbol("G_BG")]==0);
+    for (unsigned i=0;i<16;i++) CHECK(memory[symbol("G_X")+i]==0);
+    CHECK((memory[symbol("G_RIGHT")]|memory[symbol("G_RIGHT")+1]<<8)==1279);
+    CHECK((memory[symbol("G_TOP")]|memory[symbol("G_TOP")+1]<<8)==1023);
+}
+static int floor_divide(int value,int divisor) { return value>=0 ? value/divisor : (value-divisor+1)/divisor; }
+static void test_scaled_coordinates(void) {
+    for (unsigned mode=8;mode<=9;mode++) {
+        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        int height=mode==8 ? 200 : 240;
+        for (int y=-32768;y<=32767;y+=37) {
+            int expected=height-1-floor_divide(floor_divide(y,4)*height,256);
+            set_hl((uint16_t)y); invoke("G_SCALE_Y"); CHECK((int16_t)(cpu.h<<8|cpu.l)==expected);
+            set_hl((uint16_t)y); invoke("G_SCALE_X"); CHECK((int16_t)(cpu.h<<8|cpu.l)==floor_divide(y,mode==8 ? 4 : 5));
+        }
+    }
+}
+static void test_text_window_rectangles(void) {
+    const unsigned modes[]={3,6,8,9,10,11,12,13};
+    for (unsigned i=0;i<8;i++) {
+        unsigned mode=modes[i]; reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        const uint8_t window[]={28,3,6,5,2}, cursor[]={31,1,1}; vdu(window,sizeof(window)); vdu(cursor,sizeof(cursor));
+        invoke("D_WINDOW_RECT"); CHECK(!basic_error); CHECK(memory[symbol("D_X")]==4 && memory[symbol("D_Y")]==3);
+        unsigned bitmap=mode==8 || mode==9, tiles=mode>=10;
+        unsigned left=bitmap ? 24 : 3, right=bitmap ? 47 : 5, top=bitmap ? 24 : 2, bottom=bitmap ? 83 : 6;
+        CHECK((memory[symbol("D_L")]|memory[symbol("D_L")+1]<<8)==left);
+        CHECK((memory[symbol("D_R")]|memory[symbol("D_R")+1]<<8)==right);
+        CHECK((memory[symbol("D_T")]|memory[symbol("D_T")+1]<<8)==top);
+        CHECK((memory[symbol("D_B")]|memory[symbol("D_B")+1]<<8)==bottom);
+        unsigned base=bitmap ? 0x10000 : 0, stride=bitmap ? (mode==8 ? 320 : 256) : 80;
+        memset(video+base,7,bitmap ? (mode==8 ? 64000 : 61440) : 3200);
+        invoke("D_CLEAR"); CHECK(!basic_error);
+        for (unsigned y=top-1;y<=bottom+1;y++) for (unsigned x=left-1;x<=right+1;x++) {
+            unsigned blank=bitmap ? 0 : tiles ? 160 : 32;
+            unsigned want=(x>=left && x<=right && y>=top && y<=bottom) ? blank : 7;
+            CHECK(video[base+y*stride+x]==want);
+        }
+        invoke("GETCSR"); CHECK(cpu.e==0 && cpu.l==0);
+    }
+}
+static unsigned rgb332(unsigned index) {
+    unsigned r=index>>5, g=(index>>2)&7, b=index&3;
+    return ((r*4+r/2)<<11)|((g*8+g)<<5)|(b*8+b*2+b/2);
+}
+static void test_default_palettes(void) {
+    const unsigned rgb[]={0,0xf800,0x07e0,0xffe0,0x001f,0xf81f,0x07ff,0xffff};
+    const unsigned modes[]={3,6,8,9,10,11,12,13};
+    for (unsigned k=0;k<8;k++) {
+        unsigned mode=modes[k]; reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        unsigned mask=memory[symbol("D_MASK")];
+        CHECK(memory[symbol("G_ACTION")]==0 && memory[symbol("G_BG")]==0);
+        for (unsigned i=0;i<=mask;i++) {
+            unsigned want=mask==255 ? rgb332(i) : rgb[i&7];
+            if (mode>=10 && i==mask-1) want=0xffff;
+            if (mode>=10 && i==mask) want=0;
+            CHECK((video[0xe00+i*2]|video[0xe01+i*2]<<8)==want);
+        }
+    }
+    reset("D_MODE"); cpu.a=8; run();
+    for (unsigned i=0;i<8;i++) {
+        const uint8_t colour[]={19,255,i,0,0,0}; vdu(colour,sizeof(colour));
+        CHECK((video[0xffe]|video[0xfff]<<8)==rgb[i]);
+    }
+}
+static void test_mode_contract(void) {
+    const unsigned invalid[]={0,1,2,4,5,7,14,255};
+    for (unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);i++) {
+        reset("D_MODE"); cpu.a=invalid[i]; run();
+        CHECK(basic_error==255 && !video_accesses);
+        CHECK(memory[symbol("D_MODE_NO")]==3 && !memory[symbol("D_ACTIVE")]);
+    }
+    for (unsigned mode=3;mode<=6;mode+=3) {
+        reset("D_MODE"); cpu.a=8; run();
+        const uint8_t glyph[]={23,224,255,255,255,255,255,255,255,255}; vdu(glyph,sizeof(glyph));
+        cpu.a=mode; invoke("D_MODE"); CHECK(!basic_error);
+        unsigned cols=mode==3 ? 80 : 40, rows=mode==3 ? 40 : 20;
+        CHECK(video_ports[0x9c]==(mode==3 ? 0 : 1));
+        CHECK(memory[symbol("D_COLS")]==cols && memory[symbol("D_ROWS")]==rows);
+        CHECK(!memory[symbol("D_BITMAP")]); CHECK(!memcmp(video+0x3000,default_font,DEFAULT_FONT_SIZE));
+        for (unsigned y=0;y<rows;y++) for (unsigned x=cols;x<80;x++) video[y*80+x]=0x9a;
+        memset(video+rows*80,0x9b,80);
+        video[(rows-1)*80]='A';
+        const uint8_t cursor[]={31,cols-1,rows-1}; vdu(cursor,sizeof(cursor)); display_byte('Z');
+        CHECK(video[(rows-2)*80]=='A' && video[(rows-2)*80+cols-1]=='Z');
+        for (unsigned x=0;x<cols;x++) CHECK(video[(rows-1)*80+x]==' ');
+        for (unsigned y=0;y<rows;y++) for (unsigned x=cols;x<80;x++) CHECK(video[y*80+x]==0x9a);
+        for (unsigned x=0;x<80;x++) CHECK(video[rows*80+x]==0x9b);
+        invoke("GETCSR"); CHECK(cpu.e==0 && cpu.l==rows-1);
+        display_byte(31); display_byte(0); cpu.a=rows; invoke("OSWRCH"); CHECK(basic_error==255);
+    }
+}
+static void test_native_colours(void) {
+    uint8_t statement[256];
+    unsigned size=tokenize_text("GCOL 0,200:PLOT 69,80,80:A%=POINT(80,80):GCOL 0,456:CLG:B%=POINT(80,80):COLOUR 201:COLOUR 457:END",statement);
+    reset("D_MODE"); program_error_location(); cpu.a=8; run();
+    memcpy(memory+0xf200,statement,size); memory[0xf200+size]=10;
+    cpu.iy=0xf200; stop_pc=symbol("CLOOP"); invoke("XEQ"); CHECK(!basic_error);
+    CHECK(memory[symbol("STAVAR")+4]==200 && memory[symbol("STAVAR")+8]==200);
+    CHECK(memory[symbol("D_FG")]==201 && memory[symbol("D_BG")]==201);
+    CHECK(memory[symbol("G_FG")]==200 && memory[symbol("G_BG")]==200);
+    const char *invalid[]={"-1\n","512\n","65536\n"};
+    for (unsigned i=0;i<3;i++) {
+        reset("D_MODE"); cpu.a=8; run(); strcpy((char*)memory+0xf200,invalid[i]); cpu.iy=0xf200;
+        invoke("COLOUR"); CHECK(basic_error==255);
+    }
+    reset("D_MODE"); cpu.a=3; run();
+    strcpy((char*)memory+0xf200,"129\n"); cpu.iy=0xf200; stop_pc=symbol("CLOOP"); invoke("COLOUR");
+    CHECK(!basic_error && memory[symbol("D_BG")]==1);
+    strcpy((char*)memory+0xf200,"256\n"); cpu.iy=0xf200; stop_pc=0; invoke("COLOUR"); CHECK(basic_error==255);
+}
+static void test_native_tilemaps(void) {
+    const unsigned hardware[]={5,4,7,6};
+    for (unsigned mode=10;mode<=13;mode++) {
+        reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+        unsigned packed=mode>=12, mask=packed ? 15 : 255;
+        CHECK(video_ports[0x9c]==hardware[mode-10]);
+        CHECK(memory[symbol("D_COLS")]==(mode%2==0 ? 20 : 40));
+        CHECK(memory[symbol("D_ROWS")]==(mode%2==0 ? 15 : 30));
+        for (unsigned i=0;i<1024;i++) CHECK(video[0x2800+i]==0);
+        for (unsigned i=0;i<256;i++) CHECK(video[0x10000+i]==0);
+        unsigned tile=193, offset=0x10000+tile*(packed ? 128 : 256);
+        for (unsigned y=0;y<16;y++) for (unsigned x=0;x<16;x++) {
+            unsigned want=mask;
+            if (x<8 && y<12 && (default_font[65*12+y] & (0x80>>x))) want=mask-1;
+            unsigned raw=video[offset+y*(packed ? 8 : 16)+(packed ? x/2 : x)];
+            unsigned got=packed ? ((x&1) ? raw&15 : raw>>4) : raw;
+            CHECK(got==want);
+        }
+        display_byte('A'); CHECK(video[0]==193 && video[1]==160);
+        if (packed) CHECK(video[0x1000]==0);
+        const uint8_t custom[]={23,65,255,255,255,255,255,255,255,255}; vdu(custom,sizeof(custom));
+        CHECK(video[offset]==(packed ? 0xee : 254));
+        /* All 256 palette indices remain programmable, including 4-bit banks. */
+        const uint8_t bank_colour[]={19,200,16,255,128,0}; vdu(bank_colour,sizeof(bank_colour));
+        CHECK(video[0xf90]==0 && video[0xf91]==0xfc);
+        set_de(packed ? 1 : 224); invoke("D_COLOUR"); CHECK(!basic_error);
+        unsigned ink=mask-1; CHECK((video[0xe00+ink*2]|video[0xe01+ink*2]<<8)==0xf800);
+        set_de(256+(packed ? 4 : 3)); invoke("D_COLOUR"); CHECK(!basic_error);
+        CHECK((video[0xe00+mask*2]|video[0xe01+mask*2]<<8)==0x001f);
+        CHECK((video[0xe00+ink*2]|video[0xe01+ink*2]<<8)==0xf800);
+        cpu.a=69; set_de(80); set_hl(80); invoke("G_PLOT"); CHECK(basic_error==255);
+    }
+}
+static void test_mode9_drawing(void) {
+    reset("D_MODE"); cpu.a=9; run(); CHECK(!basic_error);
+    cpu.a=0; set_de(200); invoke("G_COLOUR");
+    plot(4,0,0); plot(5,0,1023); CHECK(point(0,0)==200 && point(0,1023)==200);
+    invoke("G_CLEAR"); plot(4,0,0); plot(4,1279,0); plot(85,640,400);
+    CHECK(point(640,100)==200 && point(640,500)==0);
+    CHECK(video[0x10000+216*256+128]==200);
+    CHECK(point(1280,0)==-1 && point(0,1024)==-1);
+}
+static void test_graphics_semantics(void) {
+    uint8_t statement[256];
+    unsigned size = tokenize_text("GCOL 0,2:MOVE 0,0:DRAW 80,80:A%=POINT(80,80):B%=POINT(-4,0):END", statement);
+    reset("D_MODE"); program_error_location(); cpu.a = 8; run(); CHECK(!basic_error);
+    memcpy(memory + 0xf200, statement, size); memory[0xf200+size] = 10;
+    cpu.iy = 0xf200; stop_pc = symbol("CLOOP"); invoke("XEQ");
+    CHECK(!basic_error);
+    CHECK(memory[symbol("STAVAR")+4] == 2);
+    CHECK(memory[symbol("STAVAR")+8] == 255 && memory[symbol("STAVAR")+11] == 255);
+    stop_pc = 0;
+    invoke("G_CLEAR"); CHECK(!basic_error);
+    cpu.a = 3; set_de(1); invoke("G_COLOUR");
+    for (int i=0;i<2;i++) {
+        plot(4,40,40); plot(4,200,40); plot(85,120,200);
+        CHECK(point(120,80) == (i == 0 ? 1 : 0));
+        CHECK(point(120,240) == 0);
+    }
+    cpu.a = 0; set_de(2); invoke("G_COLOUR");
+    const uint8_t window[] = {24,40,0,40,0,200,0,200,0}; vdu(window,sizeof(window));
+    plot(4,-32768,-32768); plot(101,32767,32767);
+    CHECK(point(120,120) == 2); CHECK(point(0,0) == -1);
+    CHECK(point(32767,32767) == -1); CHECK(point(-32768,-32768) == -1);
+    const uint8_t origin[] = {29,40,0,40,0}; vdu(origin,sizeof(origin));
+    CHECK(point(80,80) == 2);
+    display_byte(26);
+    const uint8_t wide_window[]={24,255,255,255,255,255,127,255,127};
+    vdu(wide_window,sizeof(wide_window)); CHECK(point(120,120)==2);
+    display_byte(26);
+    const uint8_t palette[] = {19,2,16,255,128,0}; vdu(palette,sizeof(palette));
+    CHECK(video[0xe04] == 0 && video[0xe05] == 0xfc);
+    CHECK(point(120,120) == 2);
+    /* POINT and stream plotting preserve the alternate arithmetic bank. */
+    prepare_keyboard();
+    const uint8_t vp[] = {25,69,160,0,160,0}; vdu(vp,sizeof(vp)); check_alternates();
+    CHECK(point(160,160) == 2); check_alternates();
+    cpu.iff1 = cpu.iff2 = true;
+    set_de(0); cpu.a=1; invoke("V_WRITE"); CHECK(cpu.iff1 && cpu.mmu.pages[0] == 0);
+    cpu.iff1 = cpu.iff2 = false;
+    set_de(0); invoke("V_READ"); CHECK(!cpu.iff1 && cpu.mmu.pages[0] == 0);
+    /* Every GCOL action reads the same stored logical pixel. */
+    const int expected[] = {1,3,0,3,253};
+    for (unsigned action=0;action<5;action++) {
+        cpu.a=0; set_de(2); invoke("G_COLOUR"); plot(69,400,400);
+        cpu.a=action; set_de(1); invoke("G_COLOUR"); plot(69,400,400);
+        CHECK(point(400,400) == expected[action]);
+    }
+    invoke("G_CLEAR"); cpu.a=0; set_de(1); invoke("G_COLOUR");
+    plot(4,80,80); plot(5,80,200); plot(4,200,80); plot(5,200,200);
+    plot(77,120,120); CHECK(point(120,120)==1); CHECK(point(40,120)==0);
+    invoke("G_CLEAR"); cpu.a=0; set_de(1); invoke("G_COLOUR");
+    plot(4,0,0); plot(5,80,80);
+    vdu(origin,sizeof(origin)); cpu.a=0; set_de(2); invoke("G_COLOUR");
+    plot(5,120,120); CHECK(point(40,40)==2);
+    display_byte(26); cpu.a=0; set_de(1); invoke("G_COLOUR");
+    plot(5,200,200); CHECK(point(120,120)==2);
+    /* Native 8x12 cells scroll exactly one 12-pixel row. */
+    const uint8_t bw[]={28,0,5,1,2}; vdu(bw,sizeof(bw));
+    for (unsigned y=24;y<72;y++) for (unsigned x=0;x<16;x++) video[0x10000+y*320+x]=1+(y-24)/12;
+    invoke("D_SCROLL"); CHECK(!basic_error);
+    CHECK(video[0x10000+24*320]==2 && video[0x10000+35*320]==2);
+    CHECK(video[0x10000+36*320]==3 && video[0x10000+59*320]==4);
+    CHECK(video[0x10000+60*320]==0 && video[0x10000+71*320]==0);
+    reset("D_MODE"); cpu.a=3; run(); CHECK(!basic_error);
+    const uint8_t tw[] = {28,2,2,4,1}; vdu(tw,sizeof(tw));
+    display_byte('A'); display_byte('B'); display_byte('C'); display_byte('D');
+    CHECK(video[82] == 'A' && video[83] == 'B' && video[84] == 'C' && video[162] == 'D');
+    display_byte(10); CHECK(video[82] == 'D' && video[162] == ' ');
+    invoke("GETCSR"); CHECK(cpu.e == 0 && cpu.l == 1);
+    const uint8_t disabled[] = {21,'X',12,6,'Z'}; vdu(disabled,sizeof(disabled));
+    CHECK(video[162] == 'Z' && video[82] == 'D');
+    /* Software line input edits and echoes through this display. */
+    keys[0]='a'; keys[1]='b'; keys[2]=127; keys[3]='c'; keys[4]=10;
+    key_size=5; key_pos=0; set_hl(0xf100); invoke("OSLINE");
+    CHECK(!basic_error && !memcmp(memory+0xf100,"ac\n",3));
+    CHECK(keyboard_mode == 4);
+    reset("V_WRITE"); prepare_keyboard(); inject_interrupt = 0; interrupt_during_video = 1;
+    set_de(0); cpu.a=2; invoke("V_WRITE"); check_alternates();
+    CHECK(video[0x10000] == 2 && cpu.mmu.pages[2] == 2);
+}
+static void test_display(void) {
+    reset("D_MODE"); cpu.a = 8; run(); CHECK(!basic_error);
+    CHECK(video_ports[0x9c] == 3); CHECK(cpu.mmu.pages[0] == 0 && cpu.mmu.pages[2] == 2);
+    CHECK(memory[symbol("D_COLS")] == 40); CHECK(memory[symbol("D_ROWS")] == 16);
+    CHECK(video[0xffe] == 255 && video[0xfff] == 255);
+    CHECK(point(0,0) == 0); CHECK(point(-1,0) == -1);
+    plot(69,40,40); CHECK(point(40,40) == 255);
+    plot(70,40,40); CHECK(point(40,40) == 0);
+    cpu.a = 3; set_de(2); invoke("G_COLOUR"); CHECK(!basic_error);
+    plot(69,40,40); CHECK(point(40,40) == 2);
+    plot(69,40,40); CHECK(point(40,40) == 0);
+    cpu.a = 0; set_de(1); invoke("G_COLOUR");
+    plot(4,0,0); plot(5,80,80);
+    CHECK(point(0,0) == 1); CHECK(point(80,80) == 1);
+    plot(0,4,4); CHECK((memory[symbol("G_X")] | memory[symbol("G_X")+1] << 8) == 84);
+    plot(4,0,0); plot(101,20,20); CHECK(point(8,8) == 1);
+    display_byte(31); display_byte(5); CHECK(memory[symbol("D_PENDING")] == 1);
+    display_byte(10); invoke("GETCSR"); CHECK(cpu.e == 5 && cpu.l == 10);
+    display_byte(17); display_byte(2); CHECK(memory[symbol("D_FG")] == 2);
+    display_byte(23); display_byte(224);
+    for (int i=0;i<8;i++) display_byte(255);
+    display_byte(224); CHECK(video[0x10000 + 120*320 + 40] == 2);
+    CHECK(video[0x10000 + 132*320 + 40] == 0);
+    for (unsigned row=0;row<16;row++) {
+        const uint8_t cursor[]={31,0,row}; vdu(cursor,sizeof(cursor));
+        invoke("D_CELL"); CHECK((memory[symbol("D_GY")]|memory[symbol("D_GY")+1]<<8)==row*12);
+    }
+    display_byte(25); display_byte(69); display_byte(160); display_byte(0); display_byte(160); display_byte(0);
+    CHECK(point(160,160) == 1);
+    display_byte(31); invoke("RESET"); CHECK(memory[symbol("D_PENDING")] == 0);
+    invoke("D_EXIT"); CHECK(!basic_error); CHECK(memory[symbol("D_ACTIVE")] == 0);
+    CHECK(!memcmp(video+0x3000,default_font,DEFAULT_FONT_SIZE));
+    CHECK(memory[symbol("D_MODE_NO")]==3 && memory[symbol("Z_KIND")]==0);
+    CHECK(memory[symbol("D_COLS")]==80 && memory[symbol("D_ROWS")]==40);
+    const char *invalid_modes[]={"256\n","65536\n","-1\n"};
+    for (unsigned i=0;i<3;i++) {
+        reset("MODE"); strcpy((char*)memory+0xf200,invalid_modes[i]); cpu.iy=0xf200;
+        run(); CHECK(basic_error==255); CHECK(!video_accesses);
+    }
+    reset("D_MODE"); cpu.a = 7; run(); CHECK(basic_error == 255); CHECK(!video_accesses);
+    reset("D_MODE"); video_ports[0x82] = 0xff; cpu.a = 8; run();
+    CHECK(basic_error == 255); CHECK(!video_accesses);
+}
+static void test_graphics_examples(void) {
+    uint8_t program[8192];
+    unsigned size=tokenize_source("examples/graphics.bas",program);
+    reset("RUN0"); program_error_location();
+    /* Runtime workspace is not supplied by the loader and may contain junk. */
+    unsigned workspace=symbol("D_ORIGINAL_FONT"), end=symbol("FILE_CHANNELS");
+    memset(memory+workspace,0xa5,end-workspace);
+    program_error_location();
+    memcpy(memory+symbol("USER"),program,size);
+    unsigned top=symbol("USER")+size;
+    memory[symbol("TOP")]=top; memory[symbol("TOP")+1]=top>>8;
+    stop_pc=symbol("OSRDCH"); run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
+    CHECK(memory[symbol("D_MODE_NO")]==8); CHECK(point(100,700)==1);
+    const char *preview=getenv("BBC_GRAPHICS_PREVIEW");
+    if (preview) {
+        FILE *fp=fopen(preview,"wb"); assert(fp); fprintf(fp,"P6\n320 200\n255\n");
+        for (unsigned i=0;i<64000;i++) {
+            unsigned pal=video[0x10000+i]*2+0xe00;
+            unsigned colour=video[pal] | video[pal+1]<<8;
+            fputc(((colour>>11)&31)*255/31,fp);
+            fputc(((colour>>5)&63)*255/63,fp);
+            fputc((colour&31)*255/31,fp);
+        }
+        fclose(fp);
+    }
+    size=tokenize_source("examples/graphics-modes.bas",program);
+    reset("RUN0"); program_error_location(); memcpy(memory+symbol("USER"),program,size);
+    top=symbol("USER")+size; memory[symbol("TOP")]=top; memory[symbol("TOP")+1]=top>>8;
+    stop_pc=symbol("OSRDCH");
+    const unsigned demo_modes[]={3,6,8,9,10,11,12,13};
+    for (unsigned i=0;i<8;i++) {
+        run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
+        CHECK(memory[symbol("D_MODE_NO")]==demo_modes[i]);
+        keys[key_size++]='x'; z80_step(&cpu);
+    }
+    stop_pc=symbol("WARM"); run(); CHECK(!basic_error);
+}
+static void test_lander_erasure(void) {
+    uint8_t program[8192];
+    unsigned size=tokenize_source("examples/gfx/lander.bas",program);
+    unsigned input=example_line(program,180), input_end=input+program[input];
+    reset("RUN0"); program_error_location();
+    memcpy(memory+symbol("USER"),program,size);
+    unsigned top=symbol("USER")+size;
+    memory[symbol("TOP")]=top; memory[symbol("TOP")+1]=top>>8;
+    stop_pc=symbol("OSKEY"); run(); CHECK(!basic_error);
+    for (unsigned frame=0;frame<60;frame++) {
+        clock_ms+=250;
+        do {
+            z80_step(&cpu); run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
+        } while (cpu.iy<symbol("USER")+input || cpu.iy>=symbol("USER")+input_end);
+    }
+    /* The nose started at the top edge. Its former cells must be black after
+     * descent, rather than a white/red vertical trail above the current ship. */
+    for (unsigned y=0;y<20;y++) for (unsigned x=192;x<200;x++)
+        CHECK(video[0x10000+y*256+x]==0);
+    unsigned visible=0;
+    for (unsigned y=20;y<220;y++) for (unsigned x=192;x<200;x++)
+        visible+=video[0x10000+y*256+x]==3;
+    CHECK(visible>0); /* clearing must not remove the current rocket */
+    const char *preview=getenv("BBC_LANDER_PREVIEW");
+    if (preview) {
+        FILE *fp=fopen(preview,"wb"); assert(fp); fprintf(fp,"P6\n256 240\n255\n");
+        for (unsigned i=0;i<256*240;i++) {
+            unsigned p=0xe00+video[0x10000+i]*2;
+            unsigned colour=video[p]|video[p+1]<<8;
+            fputc(((colour>>11)&31)*255/31,fp);
+            fputc(((colour>>5)&63)*255/63,fp);
+            fputc((colour&31)*255/31,fp);
+        }
+        fclose(fp);
+    }
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
+    video_io.io_region.read = read_io; video_io.io_region.write = write_io;
     ram.mem_region.read = read_ram; ram.mem_region.write = write_ram;
     FILE *fp = fopen(argv[1], "rb"); assert(fp);
     size_t length = fread(image + 0x4000, 1, 0xc000, fp); fclose(fp); assert(length > 0);
     CHECK(symbol("__tail") <= symbol("USER"));
+    CHECK((symbol("USER") & 255) == 0); CHECK((symbol("ACCS") & 255) == 0);
+    test_display();
+    test_graphics_semantics();
+    test_line_raster();
+    test_fill_boundary();
+    test_video_spans();
+    test_glyph_raster();
+    test_bitmap_glyph_pages();
+    test_graphics_delete();
+    test_lander_erasure();
+    test_runtime_video_state();
+    test_scaled_coordinates();
+    test_text_window_rectangles();
+    test_default_palettes();
+    test_mode_contract();
+    test_native_colours();
+    test_native_tilemaps();
+    test_mode9_drawing();
+    test_graphics_examples();
+    test_text_import();
+    test_time_and_inkey();
     test_errors();
     test_loads();
     test_validation();

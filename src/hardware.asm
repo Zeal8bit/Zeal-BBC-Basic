@@ -16,399 +16,287 @@
 ;    misrepresented as being the original software.
 ; 3. This notice may not be removed or altered from any source distribution.
 
+; Zeal BBC display command adapters. BBC semantics live in display/graphics,
+; not in the interpreter or the ZVB register interface.
         INCLUDE "zos_syscall.asm"
         INCLUDE "zos_video.asm"
+        PUBLIC CLG, COLOUR, DRAW, ENVEL, GCOL, MODE, MOVE, PLOT
+        PUBLIC SOUND, ADVAL, POINT, GETIMS, PUTIMS
+        PUBLIC CLRSCN, PUTCSR, GETCSR, PUTIME, GETIME
+        EXTERN EXPRI, COMMA, BRAKET, XEQ, EXTERR
+        EXTERN D_CLEAR, D_SETCURSOR, D_GETCURSOR, D_MODE, D_COLOUR, D_ERROR
+        EXTERN G_CLEAR, G_COLOUR, G_PLOT, G_POINT
 
-; HARDWARE FUNCTIONS
-
-        PUBLIC	CLG
-        PUBLIC	COLOUR
-        PUBLIC	DRAW
-        PUBLIC	ENVEL
-        PUBLIC	GCOL
-        PUBLIC	MODE
-        PUBLIC	MOVE
-        PUBLIC	PLOT
-        PUBLIC	SOUND
-        PUBLIC	ADVAL
-        PUBLIC	POINT
-        PUBLIC	GETIMS
-        PUBLIC	PUTIMS
-        PUBLIC	CLRSCN
-        PUBLIC	PUTCSR
-        PUBLIC	GETCSR
-        PUBLIC	PUTIME
-        PUBLIC	GETIME
-
-        EXTERN ZOS_SYSCALL
-        EXTERN	EXTERR
-        EXTERN	TELL
-        EXTERN	PBCDL
-        EXTERN	OUTCHR
-        EXTERN	EXPRI
-        EXTERN	COMMA
-        EXTERN	XEQ
-
-DEFC ESC	 = 	27
-
-;CLRSCN	- Clear screen.
-;	  (Alter characters to suit your VDU)
-; 	  Destroys: A,D,E,H,L,F
-CLRSCN:
-        ld h, DEV_STDOUT
-        ld c, CMD_CLEAR_SCREEN
-        BBC_SYSCALL(7)
+; Link the original interpreter hooks directly to the Zeal implementations.
+DEFC CLRSCN = D_CLEAR
+DEFC PUTCSR = D_SETCURSOR
+DEFC GETCSR = D_GETCURSOR
+GETIME: ld de,0
+        ld hl,0
         ret
-
-;PUTCSR	- Move cursor to specified position.
-;	  Inputs: DE = horizontal position (LHS=0)
-;		  HL = vertical position (TOP=0)
-; 	  Destroys: A,D,E,H,L,F
-PUTCSR:
-        push bc                 ; PRINT keeps field width and format in BC
-        ld (TEXTX), de		;SAVE X & Y FOR LATER
-        ld (TEXTY), hl
-        ld h, DEV_STDOUT
-        ld c, CMD_SET_CURSOR_XY
-        ld a, (TEXTX)
-        ld d, a
-        ld a, (TEXTY)
-        ld e, a
-        BBC_SYSCALL(7)
-        pop bc
+PUTIME: ret
+COLOUR: call BYTE_ARG
+        call D_COLOUR
+        jp XEQ
+MODE:   call BYTE_ARG
+        call D_MODE
+        jp XEQ
+GCOL:   call BYTE_ARG
+        push af
+        call COMMA
+        call BYTE_ARG
+        ld e,a
+        pop af
+        call G_COLOUR
+        jp XEQ
+CLG:    call G_CLEAR
+        jp XEQ
+MOVE:   ld a,4
+        jr XY_COMMAND
+DRAW:   ld a,5
+        jr XY_COMMAND
+PLOT:   call BYTE_ARG
+        push af
+        call COMMA
+        pop af
+XY_COMMAND:
+        push af
+        call XY_ARGS
+        pop af
+        call G_PLOT
+        jp XEQ
+; BASIC byte arguments must not silently wrap into a different mode/action.
+BYTE_ARG:
+        call EXPRI
+        ld a,h
+        or l
+        jp nz,D_ERROR
+        exx
+        ld a,h
+        or a
+        jp nz,D_ERROR
+        ld a,l
         ret
-
-;GETCSR	- Return cursor coordinates.
-;	  Outputs:  DE = X coordinate (POS)
-;		    HL = Y coordinate (VPOS)
-;  	  Destroys: A,D,E,H,L,F
-CURSOR_POS: DEFW 0x00
-GETCSR:
-        ld h, DEV_STDOUT
-        ld c, CMD_GET_CURSOR_XY
-        ld de, CURSOR_POS
-        BBC_SYSCALL(7)
-
-        ld de, (CURSOR_POS)
-
-        ld a, e
-        ld (TEXTX), a
-        ld a, d
-        ld (TEXTY), a
-
-        ld de, (TEXTX)
-        ld hl, (TEXTY)
-        RET
-
-;GETIME	- Read elapsed-time clock.
-;  	  Outputs: DEHL = elapsed time (centiseconds)
-; 	  Destroys: A,D,E,H,L,F
-GETIME:	LD	DE,0
-        LD	HL,0
-        RET
-
-;PUTIME	- Load elapsed-time clock.
-;	  Inputs: DEHL = time to load (centiseconds)
-; 	  Destroys: A,D,E,H,L,F
-PUTIME:	RET
-;
-;COLOUR	- Set text color
-COLOR_FG: DEFB 0x0F
-COLOR_BG: DEFB 0x00
-
-COLOUR:
+; Return DE=x, HL=y. EXPRI returns its integer in the alternate bank.
+XY_ARGS:
         call EXPRI
         exx
-
-        ld a, l
-        ld hl, COLOR_FG ; prepare for faster write
-        cp 128
-        jr c, LOADCLR
-BGCLR:
-        and 0x7f        ; remove MSB
-        inc hl          ; point to bg color
-LOADCLR:
-        ld (hl), a      ; load color
-OUTCLR:
-        ld h, DEV_STDOUT
-        ld c, CMD_SET_COLORS
-        ld de, (COLOR_FG)
-        BBC_SYSCALL(7)
-        JP	XEQ
-
-; GCOL - Set graphics color
-;	destroys HL, A
-GCOL:	CALL	EXPRI
-        EXX
-        LD	A,L
-        AND	0FH
-        LD	E,A		; E contains new color in background nybble
-        ADD	A,A
-        ADD	A,A
-        ADD	A,A
-        ADD	A,A
-        LD	D,A		; D contains new color in foreground nybble
-        BIT	7,L		; bit 7 set indicates backdrop color
-        JP	NZ,BDGCOL
-        LD	A,(CGCOL)
-        BIT	6,L		; bit 6 set indicates cell background color
-        JP	NZ,BGGCOL
-        AND	0FH		; clear existing foreground
-        OR	D		; set new foreground
-        LD	(CGCOL),A
-        JP	XEQ
-BGGCOL:	LD	A,(CGCOL)
-        AND	0F0H		; clear existing background
-        OR	E		; set new background
-        LD	(CGCOL),A
-        JP	XEQ
-BDGCOL:	LD	A,(CCOLOR)	; get current backdrop colors
-        AND	0F0H		; clear existing backdrop
-        OR	E		; set new backdrop
-        LD	(CCOLOR),A	; save backdrop colors
-        LD	BC,(VDPADR)	; send to vdp
-        INC	C
-        LD	B,87H
-        OUT	(C),A
-        OUT	(C),B
-        JP	XEQ
-
-; set backdrop color
-
-; MODE - Set graphics mode
-;	destroys all registers
-MODE:	CALL	EXPRI		; get mode
-        EXX
-        LD	A,L
-        CALL	VDPINI
-        JP	XEQ
-
-; PLOT - Plot graphics
-;
-PLOT:	CALL	GETXY		;DE <- X, HL <- Y
-        LD	B,L
-        LD	C,E
-        CALL	BMPLOT
-XEQ1:	JP	XEQ
-
-GETXY:	CALL	EXPRI		;"X"
-        EXX
-        PUSH	HL
-        CALL	COMMA
-        CALL	EXPRI		;"Y"
-        EXX
-        POP	DE
-        RET
-
-; unimplemented functions
-CLG:
-DRAW:
-MOVE:
-POINT:
+        push hl
+        call COMMA
+        call EXPRI
+        exx
+        pop de
+        ret
+POINT:  call XY_ARGS
+        push de
+        push hl
+        call BRAKET
+        pop hl
+        pop de
+        call G_POINT           ; HL=colour, or -1 outside graphics window
+        ld a,h
+        exx
+        ld hl,0
+        bit 7,a
+        jr z,POINT_POSITIVE
+        dec hl
+POINT_POSITIVE:
+        xor a
+        ld c,a
+        ret
 ENVEL:
 SOUND:
 ADVAL:
 GETIMS:
 PUTIMS:
-        XOR	A
-        CALL	EXTERR
-        DEFM	"Not implemented"
-        DEFB	0
+        xor a
+        call EXTERR
+        defm "Not implemented"
+        defb 0
 
-; VDP state
-VDPADR:	DEFB	0BEH		; VDP base port
-VDPINT:	DEFB	0		; 0 = NMI, 1 = INT
-CMODE:	DEFB	2		; Current graphics mode
-CGCOL:	DEFB	0F0H		; Current graphics color
-CCOLOR:	DEFB	0F0H		; Current text color
-GRAPHX:	DEFW	0		; Current graphics X coordinate
-GRAPHY:	DEFW	0		; Current graphics Y coordinate
-TEXTX:	DEFW	0		; Current text X coordinate
-TEXTY:	DEFW	0		; Current text Y coordinate
-
-; VDP table addresses
-DEFC NAMTAB	 = 	3800H		; name table
-DEFC COLTAB	 = 	2000H		; color table
-DEFC PATTAB	 = 	0H		; pattern table
-DEFC SPATAB	 = 	3BC0H		; sprite attribute table
-DEFC SPPTAB	 = 	1800H		; sprite pattern table
-
-; default register values
-DEFREG:	DEFB	0, 80H		; blank, 16KB enabled
-        DEFB	NAMTAB/400H
-        DEFB	COLTAB/40H	; calculate register values from
-        DEFB	PATTAB/800H	; addresses defined above
-        DEFB	SPATAB/80H
-        DEFB	SPPTAB/800H
-
-; mode-specific register values
-MODREG:	DEFB	0, 0D0H		; MODE 0: text
-        DEFB	0, 0C0H		; MODE 1: tile graphics
-        DEFB	2, 0C0H		; MODE 2: bitmap graphics
-        DEFB	0, 0C8H		; MODE 3: multicolor graphics
-
-; initialize vdp registers to default values
-;	A = mode to set
-VDPINI:	AND	3		; limit to modes 0-3
-        LD	(CMODE),A	; save mode for later
-        LD	BC,(VDPADR)
-        INC	C		; select vdp register port
-        LD	HL,DEFREG	; look up default register values
-        LD	B,7		; register counter
-        LD	D,80H		; register address
-REGLP:	LD	E,(HL)
-        OUT	(C),E
-        OUT	(C),D
-        INC	HL
-        INC	D
-        DJNZ	REGLP
-        LD	A,(CCOLOR)	; restore saved colors
-        OUT	(C),A
-        OUT	(C),D
-
-; clear vram
-        LD	DE,4000H	; 16KB of memory
-        OUT	(C),E		; write at start of memory
-        OUT	(C),D
-        DEC	C		; select vram port
-CLRLP:	OUT	(C),B
-        DEC	DE
-        LD	A,D
-        OR	E
-        JP	NZ,CLRLP
-
-; mode-specific initialization
-        LD	A,(CMODE)
-        CP	3
-        JP	Z,MODE3
-        CP	2
-        JP	NZ,SETREG
-
-; initialize bitmap graphics (MODE 2)
-        INC	C		; select vdp register port
-        LD	B,83H		; color table register
-        LD	A,0FFH		; color table at 2000H
-        OUT	(C),A
-        OUT	(C),B
-        LD	B,84H		; pattern table register
-        LD	A,3		; pattern table at 0H
-        OUT	(C),A
-        OUT	(C),B
-        LD	DE,NAMTAB	; write to name table
-        SET	6,D
-        OUT	(C),E
-        OUT	(C),D
-        DEC	C		; select vram port
-        LD	B,3		; initialize name table with 3 sets
-        XOR	A		; of 256 bytes ranging from 00-FF
-M2LOOP:	OUT	(C),A
-        NOP			; extra time to finish vram write
-        INC	A
-        JP	NZ,M2LOOP
-        DJNZ	M2LOOP
-        JP	SETREG
-
-; initialize multicolor graphics (MODE 3)
-MODE3:	INC	C		; select vdp register port
-        LD	DE,NAMTAB	; write to name table
-        SET	6,D
-        OUT	(C),E
-        OUT	(C),D
-        DEC	C		; select vram port
-        XOR	A		; first section starts at 0
-        LD      D,6		; nametable has 6 different sections
-M3LP1:	LD      E,4		; each section has 4 identical lines
-M3LP2:	PUSH	AF		; save line starting value
-        LD      B,32		; each line is 32 bytes long
-M3LP3:	OUT     (C),A
-        NOP			; extra time to finish vram write
-        INC     A
-        DJNZ    M3LP3
-        POP	AF		; recover line starting value
-        DEC     E		; line counter
-        JP      NZ,M3LP2
-        ADD     A,32		; increase line's starting value
-        DEC     D		; section counter
-        JP      NZ,M3LP1
-
-; set mode specific registers
-SETREG:	LD	A,(CMODE)
-        LD	D,0
-        LD	E,A
-        LD	HL,MODREG	; look up mode register values
-        ADD	HL,DE
-        ADD	HL,DE
-        INC	C		; select vdp register port
-        LD	A,(HL)		; send mode register 1
-        LD	B,80H
-        OUT	(C),A
-        OUT	(C),B
-        INC	HL		; send mode register 2
-        LD	A,(HL)
-        INC	B
-        OUT	(C),A
-        OUT	(C),B
-        RET
-
-; Bit mask values for X coordinates 0 through 7
-MASK:	DEFB 80H, 40H, 20H, 10H, 8H, 4H, 2H, 1H
-
-; plot the pixel at X/Y coordinates
-;       B = Y position
-;       C = X position
-BMPLOT:	LD	A,(CMODE)	; only plot in mode 2
-        CP	2
-        RET	NZ
-        LD	A,B		; don't plot Y coord > 191
-        CP	192
-        RET	NC
-
-; calculate address offset to X,Y coord in DE
-        RRCA
-        RRCA
-        RRCA
-        AND	1FH		; D = (Y / 8)
-        LD	D,A
-        LD	A,C		; E = (X & F8)
-        AND	0F8H
-        LD	E,A
-        LD	A,B		; E |= (Y & 7)
-        AND	7
-        OR	E
-        LD	E,A
-
-; set bit in pattern table
-        LD	HL,MASK		; look up bit mask in table
-        LD	A,C		; from lower 3 bits of X coord
-        AND	7
-        LD	B,0
-        LD	C,A
-        ADD	HL,BC
-        LD	A,(HL)		; get mask in A
-        LD	BC,(VDPADR)
-        INC	C		; select vdp register port
-        LD	HL,PATTAB
-        ADD	HL,DE
-        OUT	(C),L		; set read address in pattern table
-        OUT	(C),H
-        DEC	C		; select vram port
-        IN	B,(C)		; read previous pattern
-MASKOP:	OR      B		; combine mask with previous pattern
-        SET	6,H		; set write address in pattern table
-        INC	C		; vdp register port
-        OUT	(C),L
-        OUT	(C),H
-        DEC	C		; select vram port
-        OUT     (C),A
-
-; set byte in color table
-        INC	C		; select vdp register port
-        LD	HL,COLTAB	; add the color table base address
-        ADD	HL,DE
-        SET	6,H		; set write address in color table
-        OUT	(C),L
-        OUT	(C),H
-        LD	A,(CGCOL)	; get current color
-        DEC	C		; select vram port
-        OUT	(C),A		; set color in color table
-        RET
+        PUBLIC V_READ, V_WRITE, V_SPAN, V_PAINT, V_ADDRESS, V_TEXT_ADDRESS
+        PUBLIC D_VREAD, D_VWRITE, VIDEO_ACCESS_END
+; Map virtual page 2 only while running below &8000. No OS calls or runtime
+; workspace accesses are permitted until its original mapping is restored.
+; The private IRQ wrappers also stay below &8000; interrupts remain enabled.
+V_READ:
+        push bc
+        push hl
+        call V_MAP
+        ld b,(hl)
+        jr V_RETURN
+V_WRITE:
+        push bc
+        ld b,a
+        push hl
+        call V_MAP
+        ld (hl),b
+V_RETURN:
+        ld a,c
+        out (0xf2),a
+        ld a,b
+        pop hl
+        pop bc
+        ret
+; DE=offset in pixel storage. Return HL=mapped pointer, C=original page.
+V_MAP:
+        ld a,0x80
+        in a,(0xf0)
+        ld c,a
+        ld a,d
+        rlca
+        rlca
+        and 3
+        add a,0x44
+        out (0xf2),a
+        ld a,d
+        and 0x3f
+        or 0x80
+        ld h,a
+        ld l,e
+        ret
+; DE=VRAM offset, BC=count, A=ink. V_PAINT also takes L=0/1/2/3 for
+; replace/OR/AND/XOR. Work in <=64-byte chunks that cannot cross MMU pages.
+; Only the two bytes below are accessed while mapped; keep them below &8000.
+V_SPAN:
+        ld l,0
+V_PAINT:
+        ld (V_SPAN_INK),a
+        ld a,l
+        ld (V_SPAN_OP),a
+V_SPAN_NEXT:
+        ld a,b
+        or c
+        ret z
+        push bc
+        push de
+        ld a,64
+        sub e
+        and 63
+        jr nz,V_SPAN_BOUND
+        ld a,64
+V_SPAN_BOUND:
+        ld h,a
+        ld a,b
+        or a
+        ld a,h
+        jr nz,V_SPAN_COUNT
+        cp c
+        jr c,V_SPAN_COUNT
+        ld a,c
+V_SPAN_COUNT:
+        ld b,a
+        call V_MAP
+        ld e,b                 ; count survives the pixel loop
+        ld a,(V_SPAN_OP)
+        or a
+        jr z,V_SPAN_REPLACE
+        dec a
+        jr z,V_SPAN_OR
+        dec a
+        jr z,V_SPAN_AND
+V_SPAN_XOR:
+        ld a,(V_SPAN_INK)
+        xor (hl)
+        ld (hl),a
+        inc hl
+        djnz V_SPAN_XOR
+        jr V_SPAN_RESTORE
+V_SPAN_AND:
+        ld a,(V_SPAN_INK)
+        and (hl)
+        ld (hl),a
+        inc hl
+        djnz V_SPAN_AND
+        jr V_SPAN_RESTORE
+V_SPAN_OR:
+        ld a,(V_SPAN_INK)
+        or (hl)
+        ld (hl),a
+        inc hl
+        djnz V_SPAN_OR
+        jr V_SPAN_RESTORE
+V_SPAN_REPLACE:
+        ld a,(V_SPAN_INK)
+V_SPAN_LOOP:
+        ld (hl),a
+        inc hl
+        djnz V_SPAN_LOOP
+V_SPAN_RESTORE:
+        ld a,c
+        out (0xf2),a
+        ld a,e
+        pop de
+        pop bc
+        ld l,a
+        ld h,0
+        add hl,de
+        ex de,hl
+        ld h,a
+        ld a,c
+        sub h
+        ld c,a
+        ld a,b
+        sbc a,0
+        ld b,a
+        jr V_SPAN_NEXT
+V_SPAN_INK: defb 0
+V_SPAN_OP: defb 0
+; VRAM control/font access at physical &100000.
+D_VREAD:
+        push bc
+        push hl
+        call D_VMAP
+        ld b,(hl)
+        jp V_RETURN
+D_VWRITE:
+        push bc
+        ld b,a
+        push hl
+        call D_VMAP
+        ld (hl),b
+        jp V_RETURN
+D_VMAP:
+        ld a,0x80
+        in a,(0xf0)
+        ld c,a
+        ld a,0x40
+        out (0xf2),a
+        ld a,d
+        or 0x80
+        ld h,a
+        ld l,e
+        ret
+VIDEO_ACCESS_END:
+; Shared address arithmetic, DE=x and HL=y. Carry is clear on return.
+V_ADDRESS:
+        push de
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ex de,hl
+        ld h,l
+        ld l,0
+        jr V_ADDRESS_ADD
+V_TEXT_ADDRESS:
+        push de
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,hl
+V_ADDRESS_ADD:
+        add hl,de
+        pop de
+        add hl,de
+        ex de,hl
+        or a
+        ret

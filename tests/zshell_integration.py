@@ -85,9 +85,10 @@ class Console:
     def type(self, text):
         keys = {'.': 'PERIOD', '/': 'SLASH', ':': 'SEMICOLON', ' ': 'SPACE',
                 '\n': 'ENTER', '%': '5', '=': 'EQUAL', '+': 'EQUAL',
-                '"': 'APOSTROPHE', '*': '8'}
+                '"': 'APOSTROPHE', '*': '8', ',': 'COMMA', ';': 'SEMICOLON',
+                '(': '9', ')': '0', '-': 'MINUS', '$': '4'}
         for char in text:
-            shift = char in ':%+"*' or char.isupper()
+            shift = char in ':%+"*()$' or char.isupper()
             if shift:
                 self.send('press SHIFT')
                 self.run(100_000)
@@ -112,16 +113,19 @@ class Console:
 
 
 def exercise(c, b, k, directory):
+    def line_done():
+        return b['LINE_DISPLAY_DONE'] if c.memory(b['D_ACTIVE'], 1) != b'\0' else b['LINE_DONE']
+
     def check_error():
         assert c.memory(b['ERR'], 1) == b'\0', 'Unexpected BASIC error'
 
     def line(text):
         c.type(text + '\n')
-        r = c.until(b['LINE_DONE'])
+        r = c.until(line_done())
         assert r['AF'] >> 8 == 0, f'Line read failed: {r}'
         # INPUT uses a different page-aligned buffer from the command prompt.
         assert c.memory(r['HL'] - len(text), len(text) + 1) == (text + '\n').encode()
-        c.clear(b['LINE_DONE'])
+        c.clear(line_done())
 
     def prompt():
         c.bp(b['OSLINE'])
@@ -129,7 +133,7 @@ def exercise(c, b, k, directory):
         c.until(b['OSLINE'])
         check_error()
         c.clear(b['OSLINE'])
-        c.bp(b['LINE_DONE'])
+        c.bp(line_done())
         c.run()
 
     def integer(name):
@@ -154,7 +158,7 @@ def exercise(c, b, k, directory):
     assert r['I'] == k['interrupt_vector_table'] >> 8, 'Kernel vectors not restored for syscall'
     assert r['BC'] == 255 and r['DE'] == b['ACCS'], 'Wrong stdin read buffer or length'
     c.clear(k['keyboard_read'])
-    c.bp(b['LINE_DONE'])
+    c.bp(line_done())
     c.run(30_000_000)
     assert c.regs()['PC'] != b['LINE_DONE'], 'Idle stdin read returned instead of blocking'
     check_error()
@@ -176,7 +180,7 @@ def exercise(c, b, k, directory):
     assert b'         1\n' in printed, repr(printed)
     c.clear(b['OSWRCH'])
     c.clear(b['OSLINE'])
-    c.bp(b['LINE_DONE'])
+    c.bp(line_done())
     c.run()
     line('A%=1+2')
     prompt()
@@ -199,7 +203,7 @@ def exercise(c, b, k, directory):
         assert integer('B') == ord('x'), 'GET did not receive the raw keypress'
         check_error()
         c.clear(b['OSLINE'])
-        c.bp(b['LINE_DONE'])
+        c.bp(line_done())
         c.run()
 
     line('B%=GET')
@@ -245,7 +249,7 @@ def exercise(c, b, k, directory):
     c.until(b['OSLINE'])
     assert c.memory(b['ERR'], 1) == b'\x11', 'Escape did not interrupt the loop'
     c.clear(b['OSLINE'])
-    c.bp(b['LINE_DONE'])
+    c.bp(line_done())
     c.run()
     print('PASS: physical Escape event interrupts an infinite GOTO loop')
     line('*BYE')
@@ -259,12 +263,130 @@ def exercise(c, b, k, directory):
     c.type('h:/bbcbasic h:/input.bbc\n')
     c.until(b['OSLINE'])
     c.clear(b['OSLINE'])
-    c.bp(b['LINE_DONE'])
+    c.bp(line_done())
     c.run()
     line('73')
     get_key()
     assert integer('A') == 73
     print('PASS: SAVE, exit to ZShell, filename auto-run, INPUT and GET after relaunch')
+
+    (directory / 'import.bbcbas').write_bytes(b'10 A%=42\r\n20 END')
+    line('LOAD$ "H:/import.bbcbas"')
+    prompt()
+    line('RUN')
+    prompt()
+    assert integer('A') == 42
+    line('SAVE "H:/import.bbc"')
+    prompt()
+    assert (directory / 'import.bbc').read_bytes().endswith(b'\0\xff\xff')
+    for stem, pauses in (('rainbow', 1), ('fireworks', 6), ('bounce', 1), ('tileparty', 4)):
+        shutil.copy2(ROOT / 'examples/gfx' / (stem + '.bas'), directory / (stem + '.bas'))
+        line(f'LOAD$ "H:/{stem}.bas"')
+        prompt()
+        expected = (ROOT / 'examples/gfx' / (stem + '.bbc')).read_bytes()
+        page = int.from_bytes(c.memory(b['PAGE'], 2), 'little')
+        top = int.from_bytes(c.memory(b['TOP'], 2), 'little')
+        actual = b''.join(c.memory(page + offset, min(128, top - page - offset))
+                          for offset in range(0, top - page, 128))
+        assert actual == expected, f'LOAD$ tokens differ for {stem}'
+        line('RUN')
+        c.bp(b['OSRDCH'])
+        c.bp(b['OSLINE'])
+        for pause in range(pauses):
+            for _ in range(30):
+                c.run(30_000_000)
+                pc = c.regs()['PC']
+                if pc == b['OSRDCH']:
+                    break
+                assert pc != b['OSLINE'], f'{stem} returned before its key pause'
+            else:
+                raise AssertionError(f'{stem} did not reach its key pause')
+            mode = 10 + pause if stem == 'tileparty' else (9 if stem == 'bounce' else 8)
+            assert c.memory(b['D_MODE_NO'], 1) == bytes([mode])
+            c.send('tap X')
+            c.send('step')
+        c.clear(b['OSRDCH'])
+        c.until(b['OSLINE'])
+        check_error()
+        assert c.memory(b['D_MODE_NO'], 1) == b'\x03'
+        c.clear(b['OSLINE'])
+        c.bp(line_done())
+        c.run()
+    print('PASS: LOAD$ streaming text, arbitrary extension, SAVE and all four graphics demos')
+
+    line('MODE 8')
+    prompt()
+    assert c.memory(b['D_BITMAP'], 1) == b'\1'
+    line('GCOL 0,2:MOVE 0,0:DRAW 80,80:A%=POINT(80,80)')
+    prompt()
+    assert integer('A') == 2
+    line('GCOL 3,2:PLOT 69,80,80:A%=POINT(80,80)')
+    prompt()
+    assert integer('A') == 0
+    line('INPUT A%')
+    prompt()
+    line('42')
+    prompt()
+    assert integer('A') == 42
+    line('B%=GET')
+    get_key()
+    line('MODE 3')
+    prompt()
+    assert c.memory(b['D_BITMAP'], 1) == b'\0'
+    line('PRINT TAB(5,10);"BBC text";:A%=POS:B%=VPOS')
+    prompt()
+    assert integer('A') == 13 and integer('B') == 10
+    line('MODE 6')
+    prompt()
+    assert c.memory(b['D_COLS'], 1) == bytes([40]) and c.memory(b['D_ROWS'], 1) == bytes([20])
+    line('PRINT TAB(5,10);"Zeal text";:A%=POS:B%=VPOS')
+    prompt()
+    assert integer('A') == 14 and integer('B') == 10
+    line('MODE 9')
+    prompt()
+    assert c.memory(b['D_COLS'], 1) == bytes([32]) and c.memory(b['D_ROWS'], 1) == bytes([20])
+    line('GCOL 0,200:PLOT 69,1279,1023:A%=POINT(1279,1023)')
+    prompt()
+    assert integer('A') == 200
+    for mode in (10, 11, 12, 13):
+        line(f'MODE {mode}')
+        prompt()
+        assert c.memory(b['Z_KIND'], 1) == bytes([2 if mode < 12 else 3])
+        line('PRINT "Tiles";:A%=POS')
+        prompt()
+        assert integer('A') == 5
+        line('INPUT A%')
+        prompt()
+        line('17')
+        prompt()
+        assert integer('A') == 17
+    print('PASS: native 40x20 text, 256x240 bitmap and all four tilemap modes with visible text/input')
+    line('MODE 8')
+    prompt()
+    line('GCOL 0,1:MOVE 0,0:DRAW 1279,1023:A%=POINT(0,0)')
+    prompt()
+    assert integer('A') == 1
+    print('PASS: bitmap drawing, XOR, POINT, graphics INPUT/GET, text mode and repeated mode changes')
+    line('REPEAT:UNTIL FALSE')
+    c.run(3_000_000)
+    # Escape must leave the display usable and restore the VDU parser.
+    c.bp(b['OSLINE'])
+    c.send('tap ESC')
+    c.run(30_000_000)
+    c.until(b['OSLINE'])
+    assert c.memory(b['ERR'], 1) == b'\x11'
+    assert c.memory(b['D_PENDING'], 1) == b'\0'
+    c.clear(b['OSLINE'])
+    c.bp(line_done())
+    c.run()
+    line('*BYE')
+    c.bp(k['keyboard_read'])
+    c.run()
+    c.until(k['keyboard_read'])
+    assert c.regs()['I'] == k['interrupt_vector_table'] >> 8
+    assert c.memory(b['D_ACTIVE'], 1) == b'\0'
+    assert c.memory(k['kb_mode'], 1) == b'\x04'
+    print('PASS: Escape in bitmap mode and restoration of ZShell text display')
 
 
 def main():

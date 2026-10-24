@@ -1,0 +1,17 @@
+10 REM Tilemap text: one ASCII character per native 16x16 tile
+20 FOR M%=10 TO 13
+30 MODE M%
+40 FOR Y%=2 TO 10
+50 FOR X%=1 TO 18
+60 PRINT TAB(X%,Y%);CHR$(33+(X%+Y%) MOD 15);
+70 NEXT:NEXT
+80 PRINT TAB(1,0);"TILE PARTY!"
+90 PRINT TAB(1,12);"MODE ";M%
+100 PRINT TAB(1,13);"Any key: next mode";
+110 REM COLOUR recolours ALL existing tilemap console text
+120 IF M%<12 THEN COLOUR 224:COLOUR 259
+130 IF M%>=12 THEN COLOUR 3:COLOUR 260
+140 A$=GET$
+150 NEXT
+160 MODE 3
+170 END

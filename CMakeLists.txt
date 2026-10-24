@@ -14,14 +14,20 @@ add_executable(bbcbasic
     src/exec.asm
     src/eval.asm
     src/fpp.asm
-    src/hardware.asm
+    src/zeal_video.asm
     src/zos.asm
+    src/display.asm
+    src/graphics.asm
     src/ram.asm
+    src/zeal_workspace.asm
+    src/zeal_import.asm
+    src/zeal_time.asm
+    src/zeal_modes.asm
 )
 
 # CMake does not scan z80asm INCLUDE directives for dependencies.
 set(zos_sdk_dir "$ENV{ZOS_PATH}/sdk/z88dk-z80asm")
-set_source_files_properties(src/hardware.asm PROPERTIES
+set_source_files_properties(src/zeal_video.asm src/display.asm PROPERTIES
     OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/zos_syscall.asm;${zos_sdk_dir}/zos_sys.asm;${zos_sdk_dir}/zos_video.asm"
 )
 set_source_files_properties(src/zos.asm PROPERTIES
@@ -33,3 +39,14 @@ set_property(TARGET bbcbasic APPEND PROPERTY ADDITIONAL_CLEAN_FILES
     "$<TARGET_FILE_DIR:bbcbasic>/bbcbasic.map"
 )
 zos_add_outputs(bbcbasic)
+
+# Runtime workspace uses linker-resolved addresses and occupies no file bytes.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_custom_command(TARGET bbcbasic POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_layout.py"
+            "$<TARGET_FILE:bbcbasic>" "$<TARGET_FILE_DIR:bbcbasic>/bbcbasic.map"
+    VERBATIM
+)
+set_property(TARGET bbcbasic APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_SOURCE_DIR}/tests/check_layout.py"
+)

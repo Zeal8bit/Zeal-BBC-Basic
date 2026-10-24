@@ -37,6 +37,13 @@
         EXTERN	FREE
         EXTERN	HIMEM
         EXTERN	ERRLIN
+        EXTERN D_BYTE, D_ACTIVE, D_EXIT, D_RESET_SEQUENCE
+        EXTERN FILE_CHANNELS, OPTVAL, KEY_QUEUE, KEY_EVENTS, ZOS_BUFFER
+        EXTERN G_RESET
+        PUBLIC RAW_WRCH
+        PUBLIC FILE_OPEN, FILE_CLOSE, SHOW_ERROR, SHOW_ERROR_NEG
+        EXTERN Z_TEXT_RESET, TEXT_ACTIVE
+        EXTERN Z_TIME_INIT, Z_TIME_REFRESH
         EXTERN	USER
 
 
@@ -79,10 +86,13 @@ OSINIT:
         push bc
         push de
         call IRQ_INIT
+        call Z_TIME_INIT
+        call G_RESET
         pop de
         pop bc
         xor a
         ld (ACCS), a
+        ld (TEXT_ACTIVE), a
         ld a, b
         or a
         jr nz, ARG_TOO_LONG    ; maximum 255 bytes plus a terminating NUL
@@ -107,6 +117,8 @@ SKIPLOAD:
         ld bc, 127
         ld (hl), 0
         ldir                    ; initialize this interpreter's ownership table
+        xor a
+        ld (OPTVAL),a
         call INPUT_RAW
         pop af
         ld de, IRQ_TABLE
@@ -185,25 +197,6 @@ SYSCALL_UNWRAPPED:
         rst 0x08
         ret
 
-;PTEXT - Print text
-;   Inputs: HL = address of text
-;            B = number of characters to print
-; Destroys: A,B,H,L,F
-;
-CPTEXT:
-        push de
-        push bc
-        ; Put buffer in DE
-        ex de, hl
-        ld c, b
-        ld b, 0
-        ld h, DEV_STDOUT
-        BBC_SYSCALL(1)
-        pop bc
-        pop de
-        ret
-
-
 ;OSRDCH - Read from the current input stream (keyboard).
 ;  Outputs: A = character
 ; Destroys: A,F
@@ -213,15 +206,36 @@ OSRDCH:
         push de
         push hl
 WAITFORKEY:
-        ld a, (RAW_INPUT)
+        ld a,(RAW_INPUT)
         or a
-        jr z, KEY_STREAM
-        call POLL_INPUT
-        ld a, (ESC_PENDING)
+        jr z,KEY_STREAM
+        ld a,(D_ACTIVE)
         or a
-        jr nz, KEY_ESCAPE
+        jr z,KEY_POLL
+        ; Display input can block inside the supported raw driver instead of
+        ; repeatedly returning in the middle of a PS/2 release sequence.
+        ld a,(ESC_PENDING)
+        or a
+        jr nz,KEY_ESCAPE
         call KEY_DEQUEUE
-        jr nc, WAITFORKEY
+        jr c,KEY_RETURN
+        ld h,DEV_STDIN
+        ld c,KB_CMD_SET_MODE
+        ld de,KB_READ_BLOCK | KB_MODE_RAW
+        BBC_SYSCALL(7)
+        or a
+        jp nz,SHOW_ERROR
+        call POLL_INPUT
+        call INPUT_RAW          ; restore nonblocking input before any drawing
+        jr KEY_POLLED
+KEY_POLL:
+        call POLL_INPUT
+KEY_POLLED:
+        ld a,(ESC_PENDING)
+        or a
+        jr nz,KEY_ESCAPE
+        call KEY_DEQUEUE
+        jr nc,WAITFORKEY
 KEY_RETURN:
         pop hl
         pop de
@@ -289,24 +303,32 @@ INPUT_COOKED:
 ; Destroys: Nothing
 ;
 OSWRCH:
-        ld (BUFFER), a
         push af
         push bc
         push de
         push hl
-        ld h, DEV_STDOUT
-        ld de, BUFFER
-        ld bc, 1
-        BBC_SYSCALL(1)
+        call D_BYTE
         pop hl
         pop de
         pop bc
         pop af
         ret
+; Only reached through the register-preserving OSWRCH/VDU boundary.
+RAW_WRCH:
+        ld (ZOS_BUFFER),a
+        ld h,DEV_STDOUT
+        ld de,ZOS_BUFFER
+        ld bc,1
+        ld l,1
+        jp ZOS_SYSCALL
 
 ;OSLINE - Read a bounded LF-terminated line into a 256-byte buffer.
 ; HL addresses the buffer (L=0). A=0 on success; errors are trappable.
 OSLINE:
+        ld a,(D_ACTIVE)
+        or a
+        jp nz,DISPLAY_LINE
+OSLINE_NATIVE:
         ld (hl), 10             ; even a failed/empty read leaves a safe buffer
         push hl
         call INPUT_COOKED
@@ -373,7 +395,7 @@ LINE_STREAM_READ:
         push bc
         ei
         ld h, DEV_STDIN
-        ld de, BUFFER
+        ld de, ZOS_BUFFER
         ld bc, 1
         BBC_SYSCALL(0)
         ld d, a
@@ -391,7 +413,7 @@ LINE_STREAM_READ:
         jr z, LINE_EOF
         jr LINE_STREAM_END
 LINE_STREAM_BYTE:
-        ld a, (BUFFER)
+        ld a, (ZOS_BUFFER)
         cp 13
         jr z, LINE_STREAM_READ
         cp 10
@@ -399,7 +421,7 @@ LINE_STREAM_BYTE:
         ld a, b
         cp 255
         jr z, LINE_STREAM_FULL
-        ld a, (BUFFER)
+        ld a, (ZOS_BUFFER)
         ld (hl), a
         inc hl
         inc b
@@ -501,23 +523,23 @@ OSSTAT:
         jp nz, SHOW_ERROR
         push bc
         push de
-        ld de, BUFFER
+        ld de, ZOS_BUFFER
         BBC_SYSCALL(4)
         or a
         jp nz, SHOW_ERROR
         pop de                  ; BCDE = current position
         pop bc
         ; Compare the full 32-bit size with the position, most significant first.
-        ld a, (BUFFER + 4)
+        ld a, (ZOS_BUFFER + 4)
         cp b
         jr nz, FILE_EOF_COMPARE
-        ld a, (BUFFER + 3)
+        ld a, (ZOS_BUFFER + 3)
         cp c
         jr nz, FILE_EOF_COMPARE
-        ld a, (BUFFER + 2)
+        ld a, (ZOS_BUFFER + 2)
         cp d
         jr nz, FILE_EOF_COMPARE
-        ld a, (BUFFER + 1)
+        ld a, (ZOS_BUFFER + 1)
         cp e
 FILE_EOF_COMPARE:
         jr c, FILE_AT_EOF        ; also EOF if the file shrank below the position
@@ -542,7 +564,7 @@ OSBGET:
         push de
         push hl
         ld h, e
-        ld de, BUFFER
+        ld de, ZOS_BUFFER
         ld bc, 1
         BBC_SYSCALL(0)
         or a
@@ -572,9 +594,9 @@ OSBPUT:
         push de
         push hl
         ld h, e
-        ld de, BUFFER
+        ld de, ZOS_BUFFER
         ld bc, 1
-        ; Byte to write in BUFFER
+        ; Byte to write in ZOS_BUFFER
         ld (de), a
         BBC_SYSCALL(1)
         or a
@@ -613,15 +635,15 @@ OSLOAD:
         push hl
         push de
         push bc
-        ld de, BUFFER
+        ld de, ZOS_BUFFER
         BBC_SYSCALL(4)
         or a
         jr nz, LOAD_STAT_ERROR
-        ld hl, (BUFFER + 3)
+        ld hl, (ZOS_BUFFER + 3)
         ld a, h
         or l
         jr nz, LOAD_TOO_LARGE
-        ld hl, (BUFFER + 1)
+        ld hl, (ZOS_BUFFER + 1)
         pop bc
         or a
         sbc hl, bc
@@ -648,7 +670,7 @@ LOAD_STAT_ERROR:
 LOAD_FITS:
         ld a, 1
         ld (LOAD_ACTIVE), a
-        ld bc, (BUFFER + 1)
+        ld bc, (ZOS_BUFFER + 1)
         ld (OSLOAD_SIZE), bc
         ld (FILE_REMAIN), bc
         ld l, 0                 ; Zeal read syscall
@@ -675,7 +697,7 @@ FILE_TRANSFER:
         call FILE_CHUNK
         call ZOS_SYSCALL
         or a
-        jp nz, CLOSE_ERROR
+        jr nz, CLOSE_ERROR
         ld a, b
         or c
         jr z, FILE_STALLED       ; EOF before stat size, or no write progress
@@ -692,7 +714,7 @@ FILE_TRANSFER:
         jr FILE_TRANSFER
 FILE_STALLED:
         ld a, ERR_FAILURE
-        jp CLOSE_ERROR
+        jr CLOSE_ERROR
 
 ; BC = min(BC, bytes until next 16KB boundary). Preserve HL and DE.
 FILE_CHUNK:
@@ -742,7 +764,7 @@ OSSAVE:
         call FILE_TRANSFER
         call FILE_CLOSE
         or a
-        jp nz, SHOW_ERROR
+        jr nz, SHOW_ERROR
         ret
 CLOSE_ERROR:
         ; Keep the original failure even when cleanup fails too.
@@ -785,15 +807,15 @@ OSSHUT:
         ld h, e
         call FILE_CLOSE
         or a
-        jp nz, SHOW_ERROR
+        jr nz, SHOW_ERROR
         ret
 CHANNEL_ERROR:
         ld a, ERR_INVALID_FILEDEV
-        jp SHOW_ERROR
+        jr SHOW_ERROR
 CLOSE_ALL:
         call OSCLEAN
         or a
-        jp nz, SHOW_ERROR
+        jr nz, SHOW_ERROR
         ret
 
 ; Best-effort cleanup: attempt every owned close and return the first error in
@@ -827,7 +849,6 @@ CLEAN_NEXT:
         or a
         ret
 
-FILE_CHANNELS: DEFS 128
 CLOSE_FAILURE: DEFB 0
 
 ;
@@ -838,14 +859,14 @@ CLOSE_FAILURE: DEFB 0
 ;
 GETEXT:
         ld h, e
-        ld de, BUFFER
+        ld de, ZOS_BUFFER
         BBC_SYSCALL(4)
         ; Report errors before interpreting the stat buffer.
         or a
         jr nz, GETEXT_ERROR
         ; Skip s_flags; s_size is a little-endian 32-bit value at offset 1.
-        ld hl, (BUFFER + 1)
-        ld de, (BUFFER + 3)
+        ld hl, (ZOS_BUFFER + 1)
+        ld de, (ZOS_BUFFER + 3)
         ret
 GETEXT_ERROR:
         jp SHOW_ERROR
@@ -894,6 +915,7 @@ PUTPTR:
 
 
 PROMPT:
+        call D_RESET_SEQUENCE
         ld a, '>'
         call OSWRCH
         ld a, ' '
@@ -903,6 +925,7 @@ PROMPT:
 ;BYE - Stop interrupts and return to CP/M.
 ;
 BYE:
+        call D_EXIT
         ld e, 0
         call OSSHUT
         call INPUT_COOKED
@@ -914,6 +937,8 @@ BYE:
         BBC_SYSCALL(15)
 
 RESET:
+        call Z_TEXT_RESET
+        call D_RESET_SEQUENCE
         xor a
         ld (OPTVAL), a
         ld (ESC_PENDING), a
@@ -924,15 +949,12 @@ RESET:
         ld (TRAP_COUNT), a
         ret
 
-OPTVAL: DEFS 1
 RAW_INPUT: DEFB 0
 ESC_PENDING: DEFB 0
 TRAP_COUNT: DEFB 20
 KEY_COUNT: DEFB 0
 KEY_READ: DEFB 0
 KEY_WRITE: DEFB 0
-KEY_QUEUE: DEFS 16
-KEY_EVENTS: DEFS 2
 KEY_MODIFIERS: DEFB 0            ; L/R Shift, L/R Ctrl, Caps Lock, Caps key down
 
 ;LTRAP - Poll and abort on Escape. Preserve all register pairs, including
@@ -963,17 +985,25 @@ TRAP:
 ; Preserve arithmetic registers across polling as well as asynchronous IRQs.
 ; Destroys main registers only; IX/IY remain owned by the interpreter.
 POLL_INPUT:
+        call Z_TIME_REFRESH
         ; IRQ and syscall boundaries preserve the alternate bank.
         ei
         nop
         ld a, (RAW_INPUT)
         or a
         jr z, POLL_DONE
-        ; Two bytes accommodate a complete release pair without consuming
-        ; unrelated events that the decoder cannot retain.
+        ; Native GET retains its small read. Display echo can leave several
+        ; events pending: drain a batch larger than twice the kernel's 16-byte
+        ; PS/2 FIFO. Older raw drivers truncate a release pair if only one
+        ; output byte remains, losing modifier releases at that boundary.
+        ld bc,2
+        ld a,(D_ACTIVE)
+        or a
+        jr z,POLL_SIZE_READY
+        ld c,64
+POLL_SIZE_READY:
         ld h, DEV_STDIN
         ld de, KEY_EVENTS
-        ld bc, 2
         BBC_SYSCALL(0)
         or a
         jr nz, POLL_DONE
@@ -1023,7 +1053,7 @@ KEY_EVENT:
         jp z, KEY_MODIFIER
         ld d, 8
         cp KB_RIGHT_CTRL
-        jp z, KEY_MODIFIER
+        jr z, KEY_MODIFIER
         cp KB_CAPS_LOCK
         jp z, KEY_CAPS
         ld a, e
@@ -1074,11 +1104,11 @@ KEY_PUNCTUATION:
         ld hl, KEY_SHIFT_BASE
         ld bc, KEY_SHIFT_SIZE
         cpir
-        jp nz, KEY_ENQUEUE
+        jr nz, KEY_ENQUEUE
         ld de, KEY_SHIFTED - KEY_SHIFT_BASE - 1
         add hl, de
         ld a, (hl)
-        jp KEY_ENQUEUE
+        jr KEY_ENQUEUE
 KEY_KEYPAD:
         sub KB_NUMPAD_0
         cp 16
@@ -1088,7 +1118,7 @@ KEY_KEYPAD:
         ld hl, KEY_PAD_ASCII
         add hl, de
         ld a, (hl)
-        jp KEY_ENQUEUE
+        jr KEY_ENQUEUE
 KEY_MODIFIER:
         ld a, e
         or a
@@ -1237,11 +1267,72 @@ CLI_CPM_TEXT: DEFM "CPM"
 ; Destroys: A,H,L,F
 ;
 OSKEY:
-        xor a
+        ld a,h
+        or l
+        jr nz,OSKEY_UNSUPPORTED
+        push bc
+        push de
+        call LTRAP
+        call KEY_DEQUEUE
+        pop de
+        pop bc
         ret
+OSKEY_UNSUPPORTED:
+        ld a,255
+        call EXTERR
+        DEFM "Only INKEY(0) supported"
+        DEFB 0
 
 OSCALL:
         ret
 
-    ; Make sure it's big enough for storing the stat
-BUFFER: DEFS ZOS_STAT_SIZE
+    ; ZOS_BUFFER is runtime workspace, sized for a stat record in ram.asm.
+
+; Once MODE owns the display, kernel cooked echo would target a hidden text
+; plane. Read translated raw characters and echo through the shared VDU layer.
+DISPLAY_LINE:
+        push hl
+        call INPUT_RAW
+        pop hl
+        ld a,(RAW_INPUT)
+        or a
+        jp z,OSLINE_NATIVE
+        ld b,0
+DISPLAY_LINE_KEY:
+        call OSRDCH
+        cp 13
+        jr z,DISPLAY_LINE_DONE
+        cp 10
+        jr z,DISPLAY_LINE_DONE
+        cp 8
+        jr z,DISPLAY_LINE_BACK
+        cp 127
+        jr z,DISPLAY_LINE_BACK
+        cp 32
+        jr c,DISPLAY_LINE_KEY
+        ld c,a
+        ld a,b
+        cp 254
+        jr z,DISPLAY_LINE_KEY
+        ld a,c
+        ld (hl),a
+        inc hl
+        inc b
+        call OSWRCH
+        jr DISPLAY_LINE_KEY
+DISPLAY_LINE_BACK:
+        ld a,b
+        or a
+        jr z,DISPLAY_LINE_KEY
+        dec hl
+        dec b
+        ld a,127
+        call OSWRCH
+        jr DISPLAY_LINE_KEY
+DISPLAY_LINE_DONE:
+        ld (hl),10
+        ld a,10
+        call OSWRCH
+        xor a
+LINE_DISPLAY_DONE:
+        ret
