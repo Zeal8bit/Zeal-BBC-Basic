@@ -34,6 +34,8 @@ static int file_exists;
 static uint8_t native_open[128], close_errors[128];
 static unsigned close_attempts[128], first_descriptor, exited;
 static int mode_failure, stdin_limit, clobber_syscall_alternates;
+static unsigned clock_ms;
+static unsigned clock_latch;
 static void invoke(const char *entry);
 
 static uint8_t read_ram(device_t *dev, uint32_t address) {
@@ -48,6 +50,8 @@ static void write_ram(device_t *dev, uint32_t address, uint8_t value) {
 }
 static uint8_t read_io(device_t *dev, uint32_t port) {
     if ((port & 0xf0) == 0xf0) return cpu.mmu.pages[dev->io_region.upper_addr >> 6];
+    if (video_ports[0x8e]==6 && port==0xa5) { clock_latch=clock_ms; return ~clock_latch; }
+    if (video_ports[0x8e]==6 && port==0xa6) return ~(clock_latch>>8);
     return video_ports[port];
 }
 static void write_io(device_t *dev, uint32_t port, uint8_t value) {
@@ -112,6 +116,7 @@ static void reset(const char *entry) {
     memset(close_errors, 0, sizeof(close_errors)); memset(close_attempts, 0, sizeof(close_attempts));
     first_descriptor = 2; exited = 0;
     mode_failure = 0; stdin_limit = -1; clobber_syscall_alternates = 0;
+    clock_ms = 0;
     for (unsigned i = 0; i < sizeof(file); ++i) file[i] = (uint8_t)(i * 17 + 3);
     strcpy((char *)memory + 0xf100, "test.bbc");
     memory[symbol("PAGE")] = symbol("USER"); memory[symbol("PAGE") + 1] = symbol("USER") >> 8;
@@ -799,6 +804,46 @@ static void test_text_import(void) {
     CHECK(!basic_error); CHECK(cpu.pc==stop_pc); CHECK(!strcmp(opened_name,"anything.bbcbas"));
     CHECK(memory[symbol("USER")]==5); CHECK(memory[symbol("USER")+1]==10);
 }
+static void test_time_and_inkey(void) {
+    reset("Z_TIME_INIT"); run();
+    CHECK(!basic_error); CHECK(memory[symbol("TIME_VALUE")]==0);
+    CHECK(video_ports[0xa1]==0x4f && video_ports[0xa2]==0xc3 && video_ports[0xa0]==0xe1);
+    video_ports[0x8e]=4;
+    for (unsigned elapsed=1;elapsed<=140000;elapsed+=137) {
+        clock_ms=elapsed; invoke("GETIME");
+        CHECK(!basic_error);
+        CHECK((((uint32_t)cpu.d<<24)|((uint32_t)cpu.e<<16)|cpu.h<<8|cpu.l)==elapsed/10);
+        CHECK(memory[symbol("TIME_FRACTION")]==elapsed%10);
+        CHECK(video_ports[0x8e]==4);
+    }
+    unsigned before=clock_ms;
+    set_de(0xffff); set_hl(0xfff6); invoke("PUTIME");
+    CHECK(clock_ms==before); /* TIME= does not alter the OS clock */
+    invoke("GETIME"); CHECK(cpu.d==255 && cpu.e==255 && cpu.h==255 && cpu.l==246);
+    clock_ms+=200; invoke("GETIME"); CHECK(cpu.d==0 && cpu.e==0 && cpu.h==0 && cpu.l==10);
+
+    reset("OSKEY"); prepare_keyboard(); set_hl(0); run();
+    CHECK(!basic_error); CHECK(!cpu.cf); CHECK(key_pos==key_size);
+    reset("OSKEY"); prepare_keyboard(); set_hl(0);
+    keys[0]='9'; key_size=1; set_bc(0x1234); set_de(0x5678); run();
+    CHECK(!basic_error); CHECK(cpu.cf); CHECK(cpu.a=='9');
+    CHECK((cpu.b<<8|cpu.c)==0x1234 && (cpu.d<<8|cpu.e)==0x5678);
+    set_hl(0); invoke("OSKEY"); CHECK(!cpu.cf); /* consume each key only once */
+    reset("OSKEY"); prepare_keyboard(); set_hl(0); keys[0]=0xf0; key_size=1;
+    run(); CHECK(basic_error==17);
+    reset("OSKEY"); set_hl(1); run(); CHECK(basic_error==255);
+
+    uint8_t statement[256];
+    for (unsigned available=0;available<2;available++) {
+        unsigned size=tokenize_text("A$=INKEY$(0):B%=LEN(A$):END",statement);
+        reset("XEQ"); program_error_location(); prepare_keyboard();
+        invoke("CLEAR"); cpu.pc=symbol("XEQ");
+        memcpy(memory+0xf200,statement,size); memory[0xf200+size]=10; cpu.iy=0xf200;
+        if (available) { keys[0]='9'; key_size=1; }
+        stop_pc=symbol("CLOOP"); run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
+        CHECK(memory[symbol("STAVAR")+2*4]==available);
+    }
+}
 static unsigned example_line(const uint8_t *program, unsigned number) {
     for (unsigned pos = 0; program[pos]; pos += program[pos]) {
         if ((program[pos+1] | program[pos+2] << 8) == number) return pos;
@@ -982,6 +1027,40 @@ static void test_glyph_raster(void) {
                 CHECK(video[0x10000+(gy+y)*stride+gx+x]==want);
             }
             CHECK((memory[symbol("G_X")]|memory[symbol("G_X")+1]<<8)==(mode==8 ? 192 : 200));
+        }
+    }
+}
+static void test_graphics_delete(void) {
+    for (unsigned mode=8;mode<=9;mode++) for (unsigned action=0;action<=4;action++) {
+        for (unsigned clipped=0;clipped<2;clipped++) {
+            reset("D_MODE"); cpu.a=mode; run(); CHECK(!basic_error);
+            unsigned stride=mode==8 ? 320 : 256;
+            unsigned x0=mode==8 ? 40 : 32, y0=mode==8 ? 121 : 146;
+            memset(video+0x10000,77,stride*(mode==8 ? 200 : 240));
+            for (unsigned y=0;y<12;y++) memset(video+0x10000+(y0+y)*stride+x0,31,8);
+            cpu.a=action; set_de(7); invoke("G_COLOUR");
+            cpu.a=action; set_de(256+201); invoke("G_COLOUR");
+            if (clipped) {
+                unsigned left=mode==8 ? 168 : 170;
+                const uint8_t window[]={24,left&255,left>>8,0,0,255,4,132,1};
+                vdu(window,sizeof(window));
+            }
+            display_byte(5); plot(4,160,400); display_byte(32);
+            /* Ordinary graphics spaces remain transparent. */
+            CHECK(video[0x10000+y0*stride+x0]==31);
+            display_byte(127);
+            CHECK(!basic_error);
+            unsigned left=memory[symbol("G_CL")]|memory[symbol("G_CL")+1]<<8;
+            unsigned top=memory[symbol("G_CT")]|memory[symbol("G_CT")+1]<<8;
+            for (unsigned y=y0-1;y<=y0+12;y++) for (unsigned x=x0-1;x<=x0+8;x++) {
+                unsigned inside=x>=x0 && x<x0+8 && y>=y0 && y<y0+12;
+                unsigned want=inside ? (x>=left && y>=top ? 201 : 31) : 77;
+                CHECK(video[0x10000+y*stride+x]==want);
+            }
+            CHECK((memory[symbol("G_X")]|memory[symbol("G_X")+1]<<8)==160);
+            CHECK((memory[symbol("G_Y")]|memory[symbol("G_Y")+1]<<8)==400);
+            CHECK(memory[symbol("G_ACTION")]==action && memory[symbol("G_FG")]==7);
+            CHECK(memory[symbol("G_BG")]==201 && memory[symbol("D_GRAPH_TEXT")]==1);
         }
     }
 }
@@ -1300,6 +1379,42 @@ static void test_graphics_examples(void) {
     }
     stop_pc=symbol("WARM"); run(); CHECK(!basic_error);
 }
+static void test_lander_erasure(void) {
+    uint8_t program[8192];
+    unsigned size=tokenize_source("examples/gfx/lander/zos.bas",program);
+    unsigned input=example_line(program,180), input_end=input+program[input];
+    reset("RUN0"); program_error_location();
+    memcpy(memory+symbol("USER"),program,size);
+    unsigned top=symbol("USER")+size;
+    memory[symbol("TOP")]=top; memory[symbol("TOP")+1]=top>>8;
+    stop_pc=symbol("OSKEY"); run(); CHECK(!basic_error);
+    for (unsigned frame=0;frame<60;frame++) {
+        clock_ms+=250;
+        do {
+            z80_step(&cpu); run(); CHECK(!basic_error); CHECK(cpu.pc==stop_pc);
+        } while (cpu.iy<symbol("USER")+input || cpu.iy>=symbol("USER")+input_end);
+    }
+    /* The nose started at the top edge. Its former cells must be black after
+     * descent, rather than a white/red vertical trail above the current ship. */
+    for (unsigned y=0;y<20;y++) for (unsigned x=192;x<200;x++)
+        CHECK(video[0x10000+y*256+x]==0);
+    unsigned visible=0;
+    for (unsigned y=20;y<220;y++) for (unsigned x=192;x<200;x++)
+        visible+=video[0x10000+y*256+x]==3;
+    CHECK(visible>0); /* clearing must not remove the current rocket */
+    const char *preview=getenv("BBC_LANDER_PREVIEW");
+    if (preview) {
+        FILE *fp=fopen(preview,"wb"); assert(fp); fprintf(fp,"P6\n256 240\n255\n");
+        for (unsigned i=0;i<256*240;i++) {
+            unsigned p=0xe00+video[0x10000+i]*2;
+            unsigned colour=video[p]|video[p+1]<<8;
+            fputc(((colour>>11)&31)*255/31,fp);
+            fputc(((colour>>5)&63)*255/63,fp);
+            fputc((colour&31)*255/31,fp);
+        }
+        fclose(fp);
+    }
+}
 int main(int argc, char **argv) {
     assert(argc == 3); map_path = argv[2];
     video_io.io_region.read = read_io; video_io.io_region.write = write_io;
@@ -1314,6 +1429,8 @@ int main(int argc, char **argv) {
     test_fill_boundary();
     test_video_spans();
     test_glyph_raster();
+    test_graphics_delete();
+    test_lander_erasure();
     test_runtime_video_state();
     test_scaled_coordinates();
     test_text_window_rectangles();
@@ -1324,6 +1441,7 @@ int main(int argc, char **argv) {
     test_mode9_drawing();
     test_graphics_examples();
     test_text_import();
+    test_time_and_inkey();
     test_errors();
     test_loads();
     test_validation();

@@ -43,6 +43,7 @@
         PUBLIC RAW_WRCH
         PUBLIC FILE_OPEN, FILE_CLOSE, SHOW_ERROR, SHOW_ERROR_NEG
         EXTERN Z_TEXT_RESET, TEXT_ACTIVE
+        EXTERN Z_TIME_INIT, Z_TIME_REFRESH
         EXTERN	USER
 
 
@@ -85,6 +86,7 @@ OSINIT:
         push bc
         push de
         call IRQ_INIT
+        call Z_TIME_INIT
         call G_RESET
         pop de
         pop bc
@@ -983,6 +985,7 @@ TRAP:
 ; Preserve arithmetic registers across polling as well as asynchronous IRQs.
 ; Destroys main registers only; IX/IY remain owned by the interpreter.
 POLL_INPUT:
+        call Z_TIME_REFRESH
         ; IRQ and syscall boundaries preserve the alternate bank.
         ei
         nop
@@ -1264,8 +1267,21 @@ CLI_CPM_TEXT: DEFM "CPM"
 ; Destroys: A,H,L,F
 ;
 OSKEY:
-        xor a
+        ld a,h
+        or l
+        jr nz,OSKEY_UNSUPPORTED
+        push bc
+        push de
+        call LTRAP
+        call KEY_DEQUEUE
+        pop de
+        pop bc
         ret
+OSKEY_UNSUPPORTED:
+        ld a,255
+        call EXTERR
+        DEFM "Only INKEY(0) supported"
+        DEFB 0
 
 OSCALL:
         ret

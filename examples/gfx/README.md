@@ -37,6 +37,10 @@ native emulator does not support clipboard paste into the emulated screen.
 Every demo finishes in Zeal's native 80x40 text mode (`MODE 3`). Press Escape
 to interrupt a demo, then enter `MODE 3` to restore text yourself.
 
+For a complete historical game, see [Lunar Lander](lander/README.md). It includes
+the original BBC listing and a minimally patched ZOS copy for comparison. Unlike
+the small demos above, the game leaves its bitmap visible when it finishes.
+
 Bitmap demos use BBC logical coordinates: `(0,0)` is the bottom left and the
 screen spans 1280x1024 logical units in both bitmap modes. Text `TAB` coordinates
 start at the top left. Modes 8 and 9 have 40x16 and 32x20 text grids respectively.

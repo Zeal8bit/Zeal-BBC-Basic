@@ -7,7 +7,7 @@
         EXTERN G_DO, G_AX, G_AY, G_BX, G_BY, G_CX
         EXTERN G_CY, G_DX, G_DY, G_SX, G_SY, G_ERR
         EXTERN G_MAJOR, G_DOT, G_FIRST, G_TY
-        PUBLIC G_TRANSFORM, G_TEXT_PIXEL, G_ABORT, G_SET_ORIGIN
+        PUBLIC G_TRANSFORM, G_TEXT_PIXEL, G_TEXT_ERASE_PIXEL, G_ABORT, G_SET_ORIGIN
         PUBLIC G_CLEAR, G_COLOUR, G_PLOT, G_POINT, G_RESET, G_WINDOW
         EXTERN D_BITMAP, D_MASK, D_PARAMS, D_ERROR, D_UNSUPPORTED
         EXTERN G_SPANS
@@ -271,10 +271,16 @@ G_Y_OUT:
 G_OUT:  scf
         ret
 ; Pixel writer at physical DE=x, HL=y, preserving caller registers.
+G_TEXT_ERASE_PIXEL:
+        ld a,(G_BG)
+        ld (G_INK),a
+        xor a                  ; deletion replaces with background, regardless of GCOL
+        jr G_TEXT_ACTION
 G_TEXT_PIXEL:
         ld a,(G_FG)
         ld (G_INK),a
         ld a,(G_ACTION)
+G_TEXT_ACTION:
         ld (G_DO),a
 G_PIXEL:
         push af

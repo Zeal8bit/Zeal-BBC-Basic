@@ -21,6 +21,7 @@ add_executable(bbcbasic
     src/ram.asm
     src/zeal_workspace.asm
     src/zeal_import.asm
+    src/zeal_time.asm
     src/zeal_modes.asm
 )
 

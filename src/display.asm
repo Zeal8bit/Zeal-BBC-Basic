@@ -18,7 +18,7 @@
         EXTERN ZOS_SYSCALL, RAW_WRCH, EXTERR, TRAP
         EXTERN G_CLEAR, G_COLOUR, G_PLOT, G_RESET, G_WINDOW, G_SET_ORIGIN
         EXTERN G_X, G_Y, G_ACTION, G_FG, G_BG
-        EXTERN G_TRANSFORM, G_TEXT_PIXEL, G_ABORT
+        EXTERN G_TRANSFORM, G_TEXT_PIXEL, G_TEXT_ERASE_PIXEL, G_ABORT
 D_ACTIVE: defb 0
 D_BITMAP: defb 0
 D_X: defb 0
@@ -577,6 +577,17 @@ D_DOWN_OWN:
         ret
 D_DELETE:
         call D_BACK
+        ld a,(D_GRAPH_TEXT)
+        or a
+        jr z,D_DELETE_SPACE
+        ld a,2                 ; internal graphics-cell erase, independent of glyph/GCOL
+        ld (D_GRAPH_TEXT),a
+        ld a,32
+        call D_PRINT
+        ld a,1
+        ld (D_GRAPH_TEXT),a
+        jp D_BACK
+D_DELETE_SPACE:
         ld a,32
         call D_PRINT
         jp D_BACK
@@ -702,9 +713,14 @@ D_GLYPH_COL:
         ld a,(D_GRAPH_TEXT)
         or a
         jr z,D_GLYPH_OPAQUE
+        cp 2
+        jr z,D_GLYPH_ERASE
         ld a,(D_BITS)
         bit 7,a
         call nz,G_TEXT_PIXEL
+        jr D_GLYPH_NEXT
+D_GLYPH_ERASE:
+        call G_TEXT_ERASE_PIXEL
         jr D_GLYPH_NEXT
 D_GLYPH_OPAQUE:
         ld a,(D_BITS)

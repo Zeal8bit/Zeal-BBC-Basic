@@ -72,6 +72,31 @@ above it keeps arithmetic registers safe while keyboard interrupts remain enable
 `PAGE` is aligned above the interpreter and its display workspace. See [tests/README.md](tests/README.md) for the real-kernel
 ZShell verification command; the normal `zshell/emu` kernel also works headlessly.
 
+## Timing and nonblocking input
+
+`TIME` returns a 32-bit centisecond counter; `TIME=expression` sets the local
+BASIC counter without resetting the OS clock. `INKEY$(0)` returns one pending
+keyboard character or an empty string immediately. `INKEY(0)` exposes the same
+operation as a character code or -1. Both share GET's existing translated-key
+queue and Escape handling. Positive timeouts and negative key-state queries
+are not implemented and report error 255, `Only INKEY(0) supported`.
+
+Timing uses the native ZVB timer peripheral (bank 6) at one millisecond per
+tick, with interrupts disabled for that peripheral. Its divider uses the ZVB's
+50MHz clock. The OS's optional vblank counter is not required. BASIC owns this
+timer while running; called machine code must not reconfigure it concurrently.
+Timer access restores the bank used by text and other ZVB peripherals.
+
+The adapter extends the 16-bit hardware counter at execution/key polls and
+`TIME` reads, retaining fractional milliseconds and handling normal wraps.
+It must sample at least once per **65.536 seconds**: a longer blocking OS read,
+or machine code that prevents sampling, loses complete hardware-counter wraps.
+Normal interpreted execution and the Lander game sample frequently. This is
+not an independent interrupt-driven clock and does not implement `TIME$`.
+
+An original BBC graphics game with a small, documented Zeal patch is available
+in [examples/gfx/lander](examples/gfx/lander/README.md).
+
 ## BBC graphics and VDU
 
 The display layer implements BBC BASIC commands through the ZVB's existing

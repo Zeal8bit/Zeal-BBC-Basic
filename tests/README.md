@@ -104,12 +104,42 @@ syscalls and the emulated PS/2 device; physical hardware remains unverified.
 
 ## Display checks
 
+For a repeatable comparison of Lunar Lander update rates against a cycle-accurate
+BBC Model B, see [the benchmark and results](../docs/benchmarks/lander.md).
+`benchmark_lander.py` runs the existing native emulator and the published jsbeeb
+headless API, measuring 100 complete game updates after ten warm-up updates.
+
+`TIME` adapter checks cover centisecond conversion, fractional milliseconds,
+multiple sampled hardware wraps, setting the full 32-bit counter, and overflow.
+`INKEY$(0)` checks cover an empty queue, translated input, consumption, Escape
+and rejection of unsupported timeout values.
+
+Lunar Lander has a separate real-kernel gameplay test:
+
+```sh
+python3 tests/lander_integration.py \
+  --rom /path/to/os_with_romdisk.img --kernel-map /path/to/os.map
+```
+
+It uses the unchanged ZOS listing, real ZVB timer and emulated PS/2 keypresses
+to verify an unpowered crash and a controlled soft landing. It reads the
+interpreter's scalar-variable lists for assertions without altering game state.
+The successful flight crosses the 16-bit hardware clock wrap; the production
+clock's longer-blocking-read limitation is documented in the main README.
+
 The normal regression runner also executes BBC command parsing, VDU sequences,
 all supported GCOL actions, signed/relative plotting, clipping/origin changes,
 POINT, triangles, rectangles, horizontal fills, custom characters, text windows,
 scrolling, raw line editing, and both graphics demonstration programs. Bitmap
-text uses native 8x12 cells and must not write into adjacent cells. An interrupt is injected while video memory is mapped
-to verify arithmetic registers and restoration of the temporary page mapping.
+text uses native 8x12 cells and must not write into adjacent cells.
+
+Graphics-text delete checks cover both bitmap modes, GCOL actions 0-4, a
+nonzero graphics background, clipping, cursor position and adjacent cells.
+The actual Lander listing is also run through descent to check that previous
+rocket cells are cleared while the current rocket remains visible. Set
+`BBC_LANDER_PREVIEW=/absolute/path/lander.ppm` to capture that frame.
+An interrupt is injected while video memory is mapped to verify arithmetic
+registers and restoration of the temporary page mapping.
 The font snapshot and other display scratch buffers are deliberately seeded
 with junk before the demo, proving they do not depend on zero-filled file data.
 

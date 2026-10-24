@@ -31,7 +31,8 @@ regions = [('ACCS', 256), ('BUFFER', 256), ('STAVAR', 256),
            ('D_GLYPH', 12), ('D_CURSOR', 2), ('FILE_CHANNELS', 128),
            ('OPTVAL', 1), ('KEY_QUEUE', 16), ('KEY_EVENTS', 64), ('ZOS_BUFFER', symbols['ZOS_STAT_SIZE']),
            ('TEXT_ACTIVE', 1), ('TEXT_CHANNEL', 1), ('TEXT_EOF', 1),
-           ('TEXT_SKIP_LF', 1), ('TEXT_PREVIOUS', 2), ('TEXT_SOURCE_LINE', 2)]
+           ('TEXT_SKIP_LF', 1), ('TEXT_PREVIOUS', 2), ('TEXT_SOURCE_LINE', 2),
+           ('TIME_PREVIOUS', 2), ('TIME_VALUE', 4), ('TIME_FRACTION', 1)]
 previous_end = symbols['__tail']
 for name, length in regions:
     require(previous_end <= symbols[name], name + ' overlaps preceding region')

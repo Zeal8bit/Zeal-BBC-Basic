@@ -96,6 +96,9 @@ MODE 8 is 56 pixel rows shorter than the BBC's 256-row bitmap modes; MODE 9 is
 (4). `POINT(x,y)` returns the stored unsigned logical index, including 128-255,
 or -1 outside the graphics window. `MOVE`, `DRAW`, `PLOT`, `CLG` and transparent
 bitmap graphics text share the same pixel representation.
+Graphics text remains transparent, but `VDU 127` erases the complete preceding
+native character cell to the graphics background colour, independent of GCOL's
+action and foreground. Erasure respects the graphics clipping window.
 
 In **Zeal modes 8-13**, colour arguments use:
 
