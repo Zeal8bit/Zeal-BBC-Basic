@@ -1,0 +1,52 @@
+{
+  "cycles": 329850982,
+  "seconds": 32.9850982,
+  "updates_per_second": 3.031672041528134,
+  "profile": {
+    "total_cycles": 329850982,
+    "exclusive_cycles": {
+      "Z_TIME_REFRESH": 1062312,
+      "POLL_INPUT": 1121790,
+      "GETIME": 25200,
+      "OSWRCH: graphics control": 781800,
+      "D_DRAW_GLYPH: text character": 128410832,
+      "OSWRCH: text character": 12830400,
+      "OSWRCH: text control": 422400,
+      "G_TRANSFORM": 2465300,
+      "G_PLOT": 162300,
+      "D_DRAW_GLYPH: graphics delete": 78428500,
+      "OSWRCH: graphics delete": 1915500,
+      "D_DRAW_GLYPH: graphics character": 29783300,
+      "OSWRCH: graphics character": 1025400,
+      "interpreter and other": 71415948
+    },
+    "calls": {
+      "POLL_INPUT": 610,
+      "Z_TIME_REFRESH": 910,
+      "GETIME": 300,
+      "OSWRCH: graphics control": 1500,
+      "OSWRCH: text character": 3600,
+      "D_DRAW_GLYPH: text character": 3600,
+      "OSWRCH: text control": 700,
+      "G_PLOT": 300,
+      "G_TRANSFORM": 1700,
+      "OSWRCH: graphics delete": 500,
+      "D_DRAW_GLYPH: graphics delete": 500,
+      "OSWRCH: graphics character": 300,
+      "D_DRAW_GLYPH: graphics character": 300
+    },
+    "output_bytes": {
+      "graphics control": 1500,
+      "text character": 3600,
+      "text control": 700,
+      "graphics delete": 500,
+      "graphics character": 300
+    }
+  },
+  "inputs": {
+    "binary_sha256": "5a32ae12d352b3539a62950a2f849f70dac9db588d1a198973e0e59ac68ca4f0",
+    "source_sha256": "f1c89db3cf6719ab957af4972f567017d402efc30676f04a29c05e98f89ec156",
+    "emulator_sha256": "cdfac18fb5e1466e7cb7ca2aa484f6335ed30058be62444145da3ce2e13dd5e1",
+    "kernel_sha256": "f34d453a1feb17d34c582f64139c5e8a42ac3e0f6642874b1d588695b4036b4a"
+  }
+}

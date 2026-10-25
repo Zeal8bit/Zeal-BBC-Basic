@@ -17,6 +17,7 @@ with tempfile.TemporaryDirectory(prefix='bbc-regression-') as directory:
     subprocess.run([os.environ.get('CC', 'cc'), '-std=c99', '-O2',
                     '-I', str(args.emulator / 'include'),
                     str(ROOT / 'tests/zos_regression.c'),
-                    str(args.emulator / 'hw/z80.c'), '-o', str(runner)], check=True)
+                    str(args.emulator / 'hw/z80.c'),
+                    str(args.emulator / 'hw/zvb/default_font.c'), '-o', str(runner)], check=True)
     subprocess.run([str(runner), str(args.build_dir / 'bbcbasic.bin'),
                     str(args.build_dir / 'bbcbasic.map')], check=True, cwd=ROOT)
